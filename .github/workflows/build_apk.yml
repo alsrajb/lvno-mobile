@@ -24,43 +24,139 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Setup Safe Build Environment
+      - name: Normalize Uploaded Files & Build Clean Android Project
         run: |
-          mkdir -p /tmp/backup
-          if [ -d "lib" ]; then cp -r lib /tmp/backup/; fi
-          if [ -f "pubspec.yaml" ]; then cp pubspec.yaml /tmp/backup/; fi
-          if [ -f "android/app/google-services.json" ]; then cp android/app/google-services.json /tmp/backup/; fi
-          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then cp android/app/src/main/AndroidManifest.xml /tmp/backup/; fi
-          
-          # إنشاء هيكل أندرويد قياسي نظيف
-          flutter create --org com.lvno --project-name lvno_smart_client . --overwrite
+          # 1. إصلاح أي ملفات حُفظت بامتداد .txt عن طريق الخطأ
+          for f in $(find . -name "*.txt"); do
+            mv "$f" "${f%.txt}" || true
+          done
 
-          # استعادة ملفاتنا
-          if [ -d "/tmp/backup/lib" ]; then cp -r /tmp/backup/lib/* lib/; fi
-          if [ -f "/tmp/backup/pubspec.yaml" ]; then cp /tmp/backup/pubspec.yaml pubspec.yaml; fi
-          if [ -f "/tmp/backup/google-services.json" ]; then cp /tmp/backup/google-services.json android/app/google-services.json; fi
-          if [ -f "/tmp/backup/AndroidManifest.xml" ]; then cp /tmp/backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml; fi
+          # 2. حفظ نسخة احتياطية من ملفاتنا المرفوعة في أي مسار كانت
+          mkdir -p /tmp/lvno_backup/lib /tmp/lvno_backup/kotlin
+          find . -maxdepth 3 -name "*.dart" -exec cp {} /tmp/lvno_backup/lib/ \; || true
+          find . -maxdepth 6 -name "*.kt" -exec cp {} /tmp/lvno_backup/kotlin/ \; || true
+          find . -maxdepth 4 -name "google-services.json" -exec cp {} /tmp/lvno_backup/google-services.json \; || true
 
-          # نسخ ملفات Kotlin إن وجدت
+          # 3. تنظيف المجلد وإنشاء مشروع Flutter قياسي يطابق الحزمة com.lvno.smartclient تماماً
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' -exec rm -rf {} +
+          flutter create --org com.lvno --project-name smartclient --platforms=android .
+
+          # 4. كتابة ملف pubspec.yaml نظيف ومضبوط المسافات 100%
+          cat << 'EOF' > pubspec.yaml
+          name: smartclient
+          description: LVNO SmartClient Ecosystem
+          publish_to: 'none'
+          version: 1.0.0+1
+
+          environment:
+            sdk: '>=3.2.0 <4.0.0'
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            firebase_core: ^3.6.0
+            firebase_auth: ^5.3.1
+            cloud_firestore: ^5.4.4
+            http: ^1.2.2
+            crypto: ^3.0.5
+            qr_flutter: ^4.1.0
+
+          flutter:
+            uses-material-design: true
+          EOF
+
+          # 5. استعادة ملفات Dart و Kotlin و google-services.json إلى مساراتها الدقيقة
+          if [ "$(ls -A /tmp/lvno_backup/lib)" ]; then
+            cp /tmp/lvno_backup/lib/*.dart lib/
+          fi
+
           mkdir -p android/app/src/main/kotlin/com/lvno/smartclient
-          find . -name "VpnTunnelService.kt" -exec cp {} android/app/src/main/kotlin/com/lvno/smartclient/ \; 2>/dev/null || true
-          find . -name "MainActivity.kt" -exec cp {} android/app/src/main/kotlin/com/lvno/smartclient/ \; 2>/dev/null || true
+          if [ "$(ls -A /tmp/lvno_backup/kotlin)" ]; then
+            cp /tmp/lvno_backup/kotlin/*.kt android/app/src/main/kotlin/com/lvno/smartclient/
+          fi
 
-      - name: Configure Gradle & MinSdk
+          if [ -f "/tmp/lvno_backup/google-services.json" ]; then
+            cp /tmp/lvno_backup/google-services.json android/app/google-services.json
+          fi
+
+          # 6. كتابة AndroidManifest.xml القياسي مع تصريح VpnTunnelService
+          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+
+              <application
+                  android:label="محفظة نت سباي"
+                  android:name="${applicationName}"
+                  android:usesCleartextTraffic="true"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme"
+                        />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".VpnTunnelService"
+                      android:permission="android.permission.BIND_VPN_SERVICE"
+                      android:foregroundServiceType="specialUse"
+                      android:exported="false">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService"/>
+                      </intent-filter>
+                  </service>
+
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          EOF
+
+      - name: Configure Gradle (MinSdk 23 & Google Services)
         run: |
           python3 - << 'EOF'
           import os, re
-          
-          # ضبط minSdk 23 لدعم مكتبات Firebase
-          app_gradle = "android/app/build.gradle"
-          if os.path.exists(app_gradle):
-              txt = open(app_gradle).read()
-              txt = re.sub(r'minSdk\s*=?\s*flutter\.minSdkVersion', 'minSdk = 23', txt)
-              txt = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 23', txt)
-              open(app_gradle, "w").write(txt)
+
+          # دعم كل من Groovy (.gradle) و Kotlin Script (.gradle.kts)
+          for p in ["android/settings.gradle", "android/settings.gradle.kts"]:
+              if os.path.exists(p):
+                  txt = open(p).read()
+                  if "com.google.gms.google-services" not in txt:
+                      if p.endswith(".kts"):
+                          txt = txt.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services") version "4.4.2" apply false')
+                      else:
+                          txt = txt.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false')
+                      open(p, "w").write(txt)
+
+          for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
+              if os.path.exists(app_g):
+                  txt = open(app_g).read()
+                  if os.path.exists("android/app/google-services.json") and "com.google.gms.google-services" not in txt:
+                      if app_g.endswith(".kts"):
+                          txt = txt.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services")')
+                      else:
+                          txt = txt.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"')
+                  txt = re.sub(r'minSdk\s*=?\s*flutter\.minSdkVersion', 'minSdk = 23', txt)
+                  txt = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 23', txt)
+                  open(app_g, "w").write(txt)
           EOF
 
-      - name: Install Dependencies
+      - name: Install Flutter Dependencies
         run: flutter pub get
 
       - name: Build Release APK
