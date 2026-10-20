@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Commercial LVNO V3 Project
+      - name: Generate Commercial LVNO V3 (Zero Extra Plugin Conflicts)
         shell: python
         run: |
           import os, shutil, json, subprocess, re
@@ -64,10 +64,11 @@ jobs:
               lines = [l[10:] if l.startswith("          ") else l for l in text.splitlines()]
               open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 
+          # نفس مكتبات البناء #10 الناجح تماماً بدون أي إضافات تكسر Gradle
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App
           publish_to: 'none'
-          version: 3.0.1+7
+          version: 3.1.0+8
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -81,8 +82,6 @@ jobs:
             http: ^1.2.2
             crypto: ^3.0.5
             qr_flutter: ^4.1.0
-            mobile_scanner: ^3.5.7
-            shared_preferences: ^2.3.2
 
           flutter:
             uses-material-design: true'''
@@ -230,9 +229,11 @@ jobs:
           }'''
           write_clean(os.path.join(kt_dir, "VpnTunnelService.kt"), vpn_kt)
 
+          # MainActivity.kt يتولى التخزين المحلي الأصلي + الـ VPN + مسح الـ QR الأصلي بدون مكتبات خارجية
           main_act_kt = '''package com.lvno.smartclient
 
           import android.app.Activity
+          import android.content.Context
           import android.content.Intent
           import android.net.VpnService
           import android.provider.Settings
@@ -244,17 +245,39 @@ jobs:
           class MainActivity: FlutterActivity() {
               private val CHANNEL = "com.lvno.smartclient/vpn"
               private val VPN_REQUEST_CODE = 1001
+              private val QR_REQUEST_CODE = 1002
               private var pendingResult: MethodChannel.Result? = null
+              private var pendingQrResult: MethodChannel.Result? = null
               private var pendingEcoMode: Boolean = false
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
 
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      val prefs = getSharedPreferences("lvno_local_store", Context.MODE_PRIVATE)
                       when (call.method) {
                           "getDeviceHardwareId" -> {
                               val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown_hw"
                               result.success(androidId)
+                          }
+                          "getLocalContactsJson" -> {
+                              val jsonStr = prefs.getString("contacts_json", "{}") ?: "{}"
+                              result.success(jsonStr)
+                          }
+                          "saveLocalContactsJson" -> {
+                              val jsonStr = call.argument<String>("json") ?: "{}"
+                              prefs.edit().putString("contacts_json", jsonStr).apply()
+                              result.success(true)
+                          }
+                          "scanQrNative" -> {
+                              try {
+                                  val intent = Intent("com.google.zxing.client.android.SCAN")
+                                  intent.putExtra("SCAN_MODE", "QR_CODE_MODE")
+                                  pendingQrResult = result
+                                  startActivityForResult(intent, QR_REQUEST_CODE)
+                              } catch (e: Exception) {
+                                  result.success("")
+                              }
                           }
                           "isVpnRunning" -> {
                               result.success(VpnTunnelService.isRunning.get())
@@ -312,6 +335,14 @@ jobs:
                           pendingResult?.error("DENIED", "يلزم الموافقة لتفعيل النفق", null)
                       }
                       pendingResult = null
+                  } else if (requestCode == QR_REQUEST_CODE) {
+                      if (resultCode == Activity.RESULT_OK && data != null) {
+                          val contents = data.getStringExtra("SCAN_RESULT") ?: ""
+                          pendingQrResult?.success(contents)
+                      } else {
+                          pendingQrResult?.success("")
+                      }
+                      pendingQrResult = null
                   }
               }
           }'''
@@ -321,7 +352,6 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-              <uses-permission android:name="android.permission.CAMERA"/>
 
               <application
                   android:label="نت سباي"
@@ -363,7 +393,6 @@ jobs:
           import 'dart:convert';
           import 'package:flutter/services.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
-          import 'package:shared_preferences/shared_preferences.dart';
 
           class SmartClientEngine {
             String walletId = "";
@@ -391,18 +420,33 @@ jobs:
             }
 
             Future<Map<String, String>> getLocalContacts() async {
-              final prefs = await SharedPreferences.getInstance();
-              final raw = prefs.getString('local_contacts_map') ?? '{}';
-              final Map<String, dynamic> decoded = jsonDecode(raw);
-              return decoded.map((k, v) => MapEntry(k, v.toString()));
+              try {
+                final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
+                final Map<String, dynamic> decoded = jsonDecode(raw);
+                return decoded.map((k, v) => MapEntry(k, v.toString()));
+              } catch (_) {
+                return {};
+              }
             }
 
             Future<void> saveLocalContact(String targetId, String aliasName) async {
               if (targetId.trim().isEmpty || aliasName.trim().isEmpty) return;
-              final prefs = await SharedPreferences.getInstance();
-              final current = await getLocalContacts();
-              current[targetId.trim()] = aliasName.trim();
-              await prefs.setString('local_contacts_map', jsonEncode(current));
+              try {
+                final current = await getLocalContacts();
+                current[targetId.trim()] = aliasName.trim();
+                await _vpnChannel.invokeMethod('saveLocalContactsJson', {
+                  'json': jsonEncode(current),
+                });
+              } catch (_) {}
+            }
+
+            Future<String> tryScanQrNative() async {
+              try {
+                final res = await _vpnChannel.invokeMethod<String>('scanQrNative');
+                return res ?? '';
+              } catch (_) {
+                return '';
+              }
             }
 
             Future<bool> verifyActiveHostNetwork(String hostId) async {
@@ -760,7 +804,6 @@ jobs:
           import 'package:firebase_auth/firebase_auth.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
           import 'package:qr_flutter/qr_flutter.dart';
-          import 'package:mobile_scanner/mobile_scanner.dart';
           import 'smart_client_core.dart';
 
           void main() {
@@ -921,46 +964,42 @@ jobs:
             }
 
             Future<String?> _openQrScannerModal(String title) async {
-              return await showModalBottomSheet<String>(
+              final nativeScan = await widget.engine.tryScanQrNative();
+              if (nativeScan.trim().isNotEmpty) {
+                return nativeScan.trim();
+              }
+              final manualCtrl = TextEditingController();
+              if (!mounted) return null;
+              return await showDialog<String>(
                 context: context,
-                isScrollControlled: true,
-                backgroundColor: const Color(0xFF0F172A),
-                builder: (ctx) {
-                  bool scanned = false;
-                  return SizedBox(
-                    height: MediaQuery.of(ctx).size.height * 0.72,
-                    child: Column(
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                              IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx)),
-                            ],
-                          ),
+                builder: (ctx) => AlertDialog(
+                  backgroundColor: const Color(0xFF1E293B),
+                  title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.qr_code_scanner, size: 54, color: Color(0xFF10B981)),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: manualCtrl,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: "أدخل أو الصق رقم الرمز (مثال: 1002)",
+                          filled: true,
+                          fillColor: Color(0xFF0F172A),
+                          border: OutlineInputBorder(),
                         ),
-                        Expanded(
-                          child: MobileScanner(
-                            onDetect: (capture) {
-                              if (scanned) return;
-                              final barcodes = capture.barcodes;
-                              for (final barcode in barcodes) {
-                                final raw = barcode.rawValue;
-                                if (raw != null && raw.trim().isNotEmpty) {
-                                  scanned = true;
-                                  Navigator.pop(ctx, raw.trim());
-                                  break;
-                                }
-                              }
-                            },
-                          ),
-                        ),
-                      ],
+                      ),
+                    ],
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("إلغاء")),
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx, manualCtrl.text.trim()),
+                      child: const Text("تأكيد الرمز"),
                     ),
-                  );
-                },
+                  ],
+                ),
               );
             }
 
@@ -1149,8 +1188,8 @@ jobs:
                                 style: IconButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.black),
                                 icon: const Icon(Icons.qr_code_scanner),
                                 onPressed: () async {
-                                  final code = await _openQrScannerModal("امسح رمز الحساب للتحويل");
-                                  if (code != null) {
+                                  final code = await _openQrScannerModal("مسح رمز الحساب للتحويل");
+                                  if (code != null && code.isNotEmpty) {
                                     setState(() => _receiverCtrl.text = code.replaceAll('LINK:', '').trim());
                                   }
                                 },
@@ -1369,8 +1408,8 @@ jobs:
                                 style: IconButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.black),
                                 icon: const Icon(Icons.qr_code_scanner),
                                 onPressed: () async {
-                                  final scanned = await _openQrScannerModal("امسح رمز مصادقة جهاز العائلة");
-                                  if (scanned != null) {
+                                  final scanned = await _openQrScannerModal("مسح رمز مصادقة جهاز العائلة");
+                                  if (scanned != null && scanned.isNotEmpty) {
                                     childIdCtrl.text = scanned.replaceAll('LINK:', '').trim();
                                   }
                                 },
@@ -1688,12 +1727,9 @@ jobs:
           main_clean = main_clean.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           open("lib/main.dart", "w", encoding="utf-8").write(main_clean)
 
-          # ضبط compileSdk = 34 و minSdk = 23 لنجاح تجميع الكاميرا و Firebase
           for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(app_g):
                   txt = open(app_g).read()
-                  txt = re.sub(r"compileSdk\s*=?\s*flutter\.compileSdkVersion", "compileSdk = 34", txt)
-                  txt = re.sub(r"compileSdkVersion\s+flutter\.compileSdkVersion", "compileSdkVersion 34", txt)
                   txt = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", txt)
                   txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
                   open(app_g, "w").write(txt)
