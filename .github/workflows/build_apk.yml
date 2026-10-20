@@ -24,47 +24,43 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Backup Custom Files & Generate Android Skeleton
+      - name: Setup Safe Build Environment
         run: |
-          mkdir -p /tmp/backup/kotlin
-          cp -r lib/* /tmp/backup/
-          cp pubspec.yaml /tmp/backup/
-          cp android/app/src/main/AndroidManifest.xml /tmp/backup/
-          cp android/app/src/main/kotlin/com/lvno/smartclient/* /tmp/backup/kotlin/
-          cp android/app/google-services.json /tmp/backup/
+          mkdir -p /tmp/backup
+          if [ -d "lib" ]; then cp -r lib /tmp/backup/; fi
+          if [ -f "pubspec.yaml" ]; then cp pubspec.yaml /tmp/backup/; fi
+          if [ -f "android/app/google-services.json" ]; then cp android/app/google-services.json /tmp/backup/; fi
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then cp android/app/src/main/AndroidManifest.xml /tmp/backup/; fi
+          
+          # إنشاء هيكل أندرويد قياسي نظيف
+          flutter create --org com.lvno --project-name lvno_smart_client . --overwrite
 
-          flutter create --org com.lvno --project-name smartclient .
+          # استعادة ملفاتنا
+          if [ -d "/tmp/backup/lib" ]; then cp -r /tmp/backup/lib/* lib/; fi
+          if [ -f "/tmp/backup/pubspec.yaml" ]; then cp /tmp/backup/pubspec.yaml pubspec.yaml; fi
+          if [ -f "/tmp/backup/google-services.json" ]; then cp /tmp/backup/google-services.json android/app/google-services.json; fi
+          if [ -f "/tmp/backup/AndroidManifest.xml" ]; then cp /tmp/backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml; fi
 
-          cp /tmp/backup/pubspec.yaml pubspec.yaml
-          cp /tmp/backup/*.dart lib/
-          cp /tmp/backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          # نسخ ملفات Kotlin إن وجدت
           mkdir -p android/app/src/main/kotlin/com/lvno/smartclient
-          cp /tmp/backup/kotlin/* android/app/src/main/kotlin/com/lvno/smartclient/
-          cp /tmp/backup/google-services.json android/app/google-services.json
+          find . -name "VpnTunnelService.kt" -exec cp {} android/app/src/main/kotlin/com/lvno/smartclient/ \; 2>/dev/null || true
+          find . -name "MainActivity.kt" -exec cp {} android/app/src/main/kotlin/com/lvno/smartclient/ \; 2>/dev/null || true
 
-      - name: Inject Firebase Google Services & MinSdk 23 into Gradle
+      - name: Configure Gradle & MinSdk
         run: |
           python3 - << 'EOF'
           import os, re
-
-          for p in ["android/settings.gradle", "android/settings.gradle.kts"]:
-              if os.path.exists(p):
-                  txt = open(p).read()
-                  if "com.google.gms.google-services" not in txt:
-                      txt = txt.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services" version "4.4.2" apply false')
-                      open(p, "w").write(txt)
-
+          
+          # ضبط minSdk 23 لدعم مكتبات Firebase
           app_gradle = "android/app/build.gradle"
           if os.path.exists(app_gradle):
               txt = open(app_gradle).read()
-              if "com.google.gms.google-services" not in txt:
-                  txt = txt.replace('plugins {', 'plugins {\n    id "com.google.gms.google-services"')
               txt = re.sub(r'minSdk\s*=?\s*flutter\.minSdkVersion', 'minSdk = 23', txt)
               txt = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 23', txt)
               open(app_gradle, "w").write(txt)
           EOF
 
-      - name: Install Flutter Dependencies
+      - name: Install Dependencies
         run: flutter pub get
 
       - name: Build Release APK
