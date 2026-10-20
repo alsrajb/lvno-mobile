@@ -67,7 +67,7 @@ jobs:
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App
           publish_to: 'none'
-          version: 3.0.0+6
+          version: 3.0.1+7
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -81,7 +81,7 @@ jobs:
             http: ^1.2.2
             crypto: ^3.0.5
             qr_flutter: ^4.1.0
-            mobile_scanner: ^5.2.3
+            mobile_scanner: ^3.5.7
             shared_preferences: ^2.3.2
 
           flutter:
@@ -945,7 +945,8 @@ jobs:
                           child: MobileScanner(
                             onDetect: (capture) {
                               if (scanned) return;
-                              for (final barcode in capture.barcodes) {
+                              final barcodes = capture.barcodes;
+                              for (final barcode in barcodes) {
                                 final raw = barcode.rawValue;
                                 if (raw != null && raw.trim().isNotEmpty) {
                                   scanned = true;
@@ -1687,9 +1688,12 @@ jobs:
           main_clean = main_clean.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           open("lib/main.dart", "w", encoding="utf-8").write(main_clean)
 
+          # ضبط compileSdk = 34 و minSdk = 23 لنجاح تجميع الكاميرا و Firebase
           for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(app_g):
                   txt = open(app_g).read()
+                  txt = re.sub(r"compileSdk\s*=?\s*flutter\.compileSdkVersion", "compileSdk = 34", txt)
+                  txt = re.sub(r"compileSdkVersion\s+flutter\.compileSdkVersion", "compileSdkVersion 34", txt)
                   txt = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", txt)
                   txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
                   open(app_g, "w").write(txt)
