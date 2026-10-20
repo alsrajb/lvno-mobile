@@ -24,46 +24,6 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Setup Safe Build Environment
-        run: |
-          mkdir -p /tmp/backup/lib /tmp/backup/kotlin
-          find . -maxdepth 3 -name "*.dart" -exec cp {} /tmp/backup/lib/ \; || true
-          find . -maxdepth 6 -name "*.kt" -exec cp {} /tmp/backup/kotlin/ \; || true
-          find . -maxdepth 4 -name "google-services.json" -exec cp {} /tmp/backup/google-services.json \; || true
-          if [ -f "pubspec.yaml" ]; then cp pubspec.yaml /tmp/backup/; fi
-          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then cp android/app/src/main/AndroidManifest.xml /tmp/backup/; fi
-
-          flutter create --org com.lvno --project-name smartclient . --overwrite
-
-          if [ -f "/tmp/backup/pubspec.yaml" ]; then cp /tmp/backup/pubspec.yaml pubspec.yaml; fi
-          if [ "$(ls -A /tmp/backup/lib)" ]; then cp /tmp/backup/lib/*.dart lib/; fi
-          if [ -f "/tmp/backup/google-services.json" ]; then cp /tmp/backup/google-services.json android/app/google-services.json; fi
-          if [ -f "/tmp/backup/AndroidManifest.xml" ]; then cp /tmp/backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml; fi
-
-          mkdir -p android/app/src/main/kotlin/com/lvno/smartclient
-          if [ "$(ls -A /tmp/backup/kotlin)" ]; then cp /tmp/backup/kotlin/*.kt android/app/src/main/kotlin/com/lvno/smartclient/; fi
-
-      - name: Inject Firebase Keys & MinSdk 23
-        shell: python
-        run: |
-          import os, json, re
-          if os.path.exists("android/app/google-services.json") and os.path.exists("lib/main.dart"):
-              gs = json.load(open("android/app/google-services.json"))
-              proj = gs.get("project_info", {})
-              cli = gs.get("client", [{}])[0]
-              api_key = cli.get("api_key", [{}])[0].get("current_key", "")
-              app_id = cli.get("client_info", {}).get("mobilesdk_app_id", "")
-              sender_id = proj.get("project_number", "")
-              m = open("lib/main.dart").read()
-              m = m.replace("INJECT_API_KEY", api_key).replace("INJECT_APP_ID", app_id).replace("INJECT_SENDER_ID", sender_id)
-              open("lib/main.dart", "w").write(m)
-          for g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              if os.path.exists(g):
-                  t = open(g).read()
-                  t = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", t)
-                  t = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", t)
-                  open(g, "w").write(t)
-
       - name: Install Dependencies
         run: flutter pub get
 
