@@ -24,12 +24,12 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Clean Self-Contained Project (Like Build #3 + Fix White Screen)
+      - name: Generate Complete Project with Native Android VPN Service
         shell: python
         run: |
           import os, shutil, json, subprocess, re
 
-          # 1. الاحتفاظ بملف google-services.json المرفوع في المستودع
+          # 1. الاحتفاظ بملف google-services.json واستخراج مفاتيح Firebase
           gs_data = {}
           for root, dirs, files in os.walk("."):
               if ".git" in root: continue
@@ -42,7 +42,6 @@ jobs:
                       except Exception:
                           pass
 
-          # استخراج مفاتيح Firebase الحقيقية من ملفك لتجنب الشاشة البيضاء
           proj_info = gs_data.get("project_info", {})
           project_id = proj_info.get("project_id", "netspay-1f0fc")
           sender_id = proj_info.get("project_number", "000000000000")
@@ -52,24 +51,23 @@ jobs:
           api_key_list = first_client.get("api_key", [{}])
           api_key = api_key_list[0].get("current_key", "") if api_key_list else ""
 
-          # 2. تنظيف المجلد بالكامل كما فعلنا في البناء #3 الناجح
+          # 2. تنظيف المجلد وإنشاء مشروع أندرويد قياسي نظيف
           for item in os.listdir("."):
               if item not in [".git", ".github"]:
                   if os.path.isdir(item): shutil.rmtree(item)
                   else: os.remove(item)
 
-          # 3. إنشاء مشروع Flutter قياسي نظيف 100%
           subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
 
           if os.path.exists("/tmp/google-services.json"):
               shutil.copy2("/tmp/google-services.json", "android/app/google-services.json")
 
-          # 4. كتابة pubspec.yaml المتوافق 100%
+          # 3. كتابة pubspec.yaml
           pubspec_lines = [
               "name: smartclient",
               "description: LVNO SmartClient Ecosystem",
               "publish_to: 'none'",
-              "version: 1.0.2+3",
+              "version: 1.0.3+4",
               "",
               "environment:",
               "  sdk: '>=3.2.0 <4.0.0'",
@@ -89,7 +87,247 @@ jobs:
           ]
           open("pubspec.yaml", "w").write("\n".join(pubspec_lines) + "\n")
 
-          # 5. كتابة محرك SmartClientEngine المتطابق مع الواجهة والنفق
+          # 4. كتابة كود VpnTunnelService.kt الأصلي للأندرويد
+          kt_dir = "android/app/src/main/kotlin/com/lvno/smartclient"
+          os.makedirs(kt_dir, exist_ok=True)
+
+          vpn_service_kt = '''package com.lvno.smartclient
+
+          import android.content.Intent
+          import android.net.VpnService
+          import android.os.ParcelFileDescriptor
+          import java.io.FileInputStream
+          import java.nio.ByteBuffer
+          import java.util.concurrent.atomic.AtomicBoolean
+          import java.util.concurrent.atomic.AtomicLong
+
+          class VpnTunnelService : VpnService() {
+              companion object {
+                  val isRunning = AtomicBoolean(false)
+                  val wanBytesCount = AtomicLong(0)
+                  val cacheBytesCount = AtomicLong(0)
+              }
+
+              private var vpnInterface: ParcelFileDescriptor? = null
+              private var workerThread: Thread? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val action = intent?.action
+                  if (action == "STOP_VPN") {
+                      stopVpnTunnel()
+                      return START_NOT_STICKY
+                  }
+                  if (!isRunning.get()) {
+                      startVpnTunnel()
+                  }
+                  return START_STICKY
+              }
+
+              private fun startVpnTunnel() {
+                  try {
+                      val builder = Builder()
+                          .setSession("LVNO Smart Network")
+                          .setMtu(1500)
+                          .addAddress("10.88.0.2", 24)
+                          .addDnsServer("8.8.8.8")
+                          // توجيه شبكتي الكاش والمراقبة عبر النفق مع السماح لبقية التطبيقات بالعمل بسلاسة
+                          .addRoute("10.99.99.0", 24)
+                          .addRoute("10.88.0.0", 24)
+
+                      vpnInterface = builder.establish()
+                      if (vpnInterface != null) {
+                          isRunning.set(true)
+                          startPacketInspector()
+                      }
+                  } catch (e: Exception) {
+                      isRunning.set(false)
+                  }
+              }
+
+              private fun startPacketInspector() {
+                  workerThread = Thread {
+                      val fd = vpnInterface?.fileDescriptor ?: return@Thread
+                      val inputStream = FileInputStream(fd)
+                      val packet = ByteBuffer.allocate(32767)
+
+                      while (isRunning.get() && !Thread.currentThread().isInterrupted) {
+                          try {
+                              val length = inputStream.read(packet.array())
+                              if (length > 20) {
+                                  // قراءة عنوان الوجهة في حزمة IPv4 (البايتات 16 إلى 19)
+                                  val b0 = packet.get(16).toInt() and 0xFF
+                                  val b1 = packet.get(17).toInt() and 0xFF
+                                  val b2 = packet.get(18).toInt() and 0xFF
+
+                                  // إذا كانت الحزمة متجهة إلى شبكة الخازن المحلي 10.99.99.x
+                                  if (b0 == 10 && b1 == 99 && b2 == 99) {
+                                      cacheBytesCount.addAndGet(length.toLong())
+                                  } else {
+                                      wanBytesCount.addAndGet(length.toLong())
+                                  }
+                                  packet.clear()
+                              } else {
+                                  Thread.sleep(15)
+                              }
+                          } catch (e: Exception) {
+                              break
+                          }
+                      }
+                  }
+                  workerThread?.start()
+              }
+
+              private fun stopVpnTunnel() {
+                  isRunning.set(false)
+                  workerThread?.interrupt()
+                  workerThread = null
+                  try {
+                      vpnInterface?.close()
+                  } catch (_: Exception) {}
+                  vpnInterface = null
+                  stopSelf()
+              }
+
+              override fun onDestroy() {
+                  stopVpnTunnel()
+                  super.onDestroy()
+              }
+          }
+          '''
+          open(os.path.join(kt_dir, "VpnTunnelService.kt"), "w").write(
+              "\n".join(l[10:] if l.startswith("          ") else l for l in vpn_service_kt.splitlines())
+          )
+
+          # 5. كتابة MainActivity.kt لربط Flutter مع نافذة صلاحية الـ VPN في أندرويد
+          main_activity_kt = '''package com.lvno.smartclient
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.VpnService
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "com.lvno.smartclient/vpn"
+              private val VPN_REQUEST_CODE = 1001
+              private var pendingResult: MethodChannel.Result? = null
+              private var pendingWalletId: String = "consumer_01"
+              private var pendingHostId: String = "host_alhuda_01"
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "isVpnRunning" -> {
+                              result.success(VpnTunnelService.isRunning.get())
+                          }
+                          "startVpn" -> {
+                              pendingWalletId = call.argument<String>("walletId") ?: "consumer_01"
+                              pendingHostId = call.argument<String>("hostId") ?: "host_alhuda_01"
+
+                              val prepareIntent = VpnService.prepare(this)
+                              if (prepareIntent != null) {
+                                  pendingResult = result
+                                  startActivityForResult(prepareIntent, VPN_REQUEST_CODE)
+                              } else {
+                                  launchVpnService()
+                                  result.success(true)
+                              }
+                          }
+                          "stopVpn" -> {
+                              val stopIntent = Intent(this, VpnTunnelService::class.java).apply {
+                                  action = "STOP_VPN"
+                              }
+                              startService(stopIntent)
+                              result.success(true)
+                          }
+                          "getTrafficStats" -> {
+                              val stats = mapOf(
+                                  "wanBytes" to VpnTunnelService.wanBytesCount.get(),
+                                  "cacheBytes" to VpnTunnelService.cacheBytesCount.get()
+                              )
+                              result.success(stats)
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+
+              private fun launchVpnService() {
+                  val serviceIntent = Intent(this, VpnTunnelService::class.java).apply {
+                      putExtra("walletId", pendingWalletId)
+                      putExtra("hostId", pendingHostId)
+                  }
+                  startService(serviceIntent)
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == VPN_REQUEST_CODE) {
+                      if (resultCode == Activity.RESULT_OK) {
+                          launchVpnService()
+                          pendingResult?.success(true)
+                      } else {
+                          pendingResult?.error("VPN_DENIED", "تم رفض صلاحية إنشاء نفق الشبكة", null)
+                      }
+                      pendingResult = null
+                  }
+              }
+          }
+          '''
+          open(os.path.join(kt_dir, "MainActivity.kt"), "w").write(
+              "\n".join(l[10:] if l.startswith("          ") else l for l in main_activity_kt.splitlines())
+          )
+
+          # 6. تحديث AndroidManifest.xml بتصاريح الـ VPN الرسمية
+          manifest_xml = '''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+
+              <application
+                  android:label="محفظة نت سباي"
+                  android:name="${applicationName}"
+                  android:usesCleartextTraffic="true"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme" />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".VpnTunnelService"
+                      android:permission="android.permission.BIND_VPN_SERVICE"
+                      android:exported="false">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService"/>
+                      </intent-filter>
+                  </service>
+
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>'''
+          open("android/app/src/main/AndroidManifest.xml", "w").write(
+              "\n".join(l[10:] if l.startswith("          ") else l for l in manifest_xml.splitlines())
+          )
+
+          # 7. كتابة محرك SmartClientEngine المتصل بـ MethodChannel الحقيقية
           core_code = '''import 'dart:async';
           import 'package:flutter/services.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
@@ -112,15 +350,17 @@ jobs:
               }
             }
 
-            Future<void> startSmartConnection() async {
+            Future<bool> startSmartConnection() async {
               try {
-                await _vpnChannel.invokeMethod('startVpn', {
+                final ok = await _vpnChannel.invokeMethod<bool>('startVpn', {
                   'walletId': walletId,
                   'hostId': currentHostId,
                 });
-                isVpnActive = true;
-              } catch (_) {
-                isVpnActive = true;
+                isVpnActive = ok ?? false;
+                return isVpnActive;
+              } catch (e) {
+                isVpnActive = false;
+                rethrow;
               }
             }
 
@@ -129,6 +369,18 @@ jobs:
                 await _vpnChannel.invokeMethod('stopVpn');
               } catch (_) {}
               isVpnActive = false;
+            }
+
+            Future<Map<String, int>> readNativeTrafficCounters() async {
+              try {
+                final res = await _vpnChannel.invokeMapMethod<String, dynamic>('getTrafficStats');
+                return {
+                  'wanBytes': ((res?['wanBytes'] ?? 0) as num).toInt(),
+                  'cacheBytes': ((res?['cacheBytes'] ?? 0) as num).toInt(),
+                };
+              } catch (_) {
+                return {'wanBytes': 0, 'cacheBytes': 0};
+              }
             }
 
             Future<Map<String, dynamic>> executeTransferDirect({
@@ -234,23 +486,13 @@ jobs:
 
               await batch.commit();
             }
-
-            Future<void> claimHostWanEarnings(int amountYer) async {
-              final db = FirebaseFirestore.instance;
-              final batch = db.batch();
-              batch.update(db.collection('hosts').doc(currentHostId), {
-                'amount_due_yer': FieldValue.increment(-amountYer),
-              });
-              batch.update(db.collection('wallets').doc(walletId), {
-                'balance_yer': FieldValue.increment(amountYer),
-              });
-              await batch.commit();
-            }
           }
           '''
-          open("lib/smart_client_core.dart", "w").write("\n".join(l[10:] if l.startswith("          ") else l for l in core_code.splitlines()))
+          open("lib/smart_client_core.dart", "w").write(
+              "\n".join(l[10:] if l.startswith("          ") else l for l in core_code.splitlines())
+          )
 
-          # 6. كتابة main.dart المحصن ضد الشاشة البيضاء مع مفاتيح Firebase المستخرجة
+          # 8. كتابة main.dart
           main_code = '''import 'package:flutter/material.dart';
           import 'package:firebase_core/firebase_core.dart';
           import 'package:firebase_auth/firebase_auth.dart';
@@ -328,9 +570,7 @@ jobs:
                   if (FirebaseAuth.instance.currentUser == null) {
                     await FirebaseAuth.instance.signInAnonymously().timeout(const Duration(seconds: 10));
                   }
-                } catch (_) {
-                  // السماح بفتح الواجهة حتى لو لم يفعل المستخدم Anonymous Auth بعد
-                }
+                } catch (_) {}
                 if (mounted) setState(() => _isReady = true);
               } catch (e) {
                 if (mounted) setState(() => _errorMsg = e.toString());
@@ -403,7 +643,9 @@ jobs:
             void initState() {
               super.initState();
               _engine = SmartClientEngine(walletId: activeWalletId, currentHostId: activeHostId);
-              _engine.initializeEngine();
+              _engine.initializeEngine().then((_) {
+                if (mounted) setState(() {});
+              });
             }
 
             void _switchDemoProfile(String newWalletId) {
@@ -492,16 +734,32 @@ jobs:
                                     Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
-                                        const Text("اتصال الشبكة الموحد (VPN)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                                        Text(_engine.isVpnActive ? "متصل الآن عبر النفق الذكي" : "الاتصال متوقف", style: TextStyle(fontSize: 12, color: _engine.isVpnActive ? const Color(0xFF10B981) : Colors.grey)),
+                                        const Text("اتصال الشبكة الموحد (VPN 🔑)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                        Text(
+                                          _engine.isVpnActive ? "نفق أندرويد نشط الآن (10.88.0.2)" : "الاتصال متوقف",
+                                          style: TextStyle(fontSize: 12, color: _engine.isVpnActive ? const Color(0xFF10B981) : Colors.grey),
+                                        ),
                                       ],
                                     ),
                                     Switch(
                                       value: _engine.isVpnActive,
                                       activeColor: const Color(0xFF10B981),
                                       onChanged: (val) async {
-                                        if (val) { await _engine.startSmartConnection(); } else { await _engine.stopSmartConnection(); }
-                                        setState(() {});
+                                        try {
+                                          if (val) {
+                                            final started = await _engine.startSmartConnection();
+                                            setState(() {
+                                              _statusMessage = started
+                                                  ? "✅ تم تشغيل نفق VPN أندرويد الحقيقي (انظر علامة المفتاح 🔑 أعلى الشاشة)"
+                                                  : "⚠️ لم يتم منح صلاحية الـ VPN";
+                                            });
+                                          } else {
+                                            await _engine.stopSmartConnection();
+                                            setState(() => _statusMessage = "تم إيقاف نفق الشبكة الموحد");
+                                          }
+                                        } catch (e) {
+                                          setState(() => _statusMessage = "⚠️ تنبيه VPN: $e");
+                                        }
                                       },
                                     ),
                                   ],
@@ -585,7 +843,7 @@ jobs:
           main_clean = main_clean.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           open("lib/main.dart", "w").write(main_clean)
 
-          # 7. ضبط minSdk = 23 لدعم مكتبات Firebase
+          # 9. ضبط minSdk = 23 لدعم مكتبات Firebase
           for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(app_g):
                   txt = open(app_g).read()
