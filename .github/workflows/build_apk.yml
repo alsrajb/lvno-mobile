@@ -24,6 +24,24 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
+      - name: Initialize Flutter Project & Restore Custom Files
+        run: |
+          # 1. حفظ ملفاتنا الحالية (lib و google-services.json والمحتوى المخصص) قبل تهيئة المشروع
+          mkdir -p /tmp/lvno_safe
+          if [ -d "lib" ]; then cp -r lib /tmp/lvno_safe/; fi
+          if [ -f "pubspec.yaml" ]; then cp pubspec.yaml /tmp/lvno_safe/; fi
+          if [ -f "android/app/google-services.json" ]; then cp android/app/google-services.json /tmp/lvno_safe/; fi
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then cp android/app/src/main/AndroidManifest.xml /tmp/lvno_safe/; fi
+
+          # 2. إنشاء هيكل مشروع Flutter نظيف ومتكامل من الصفر يحمل اسم الحزمة الصحيح
+          flutter create --org com.lvno --project-name smartclient --platforms=android . --overwrite
+
+          # 3. إعادة دمج ملفاتك المخصصة فوق المشروع المنشأ حديثاً
+          if [ -d "/tmp/lvno_safe/lib" ]; then cp -r /tmp/lvno_safe/lib/* lib/; fi
+          if [ -f "/tmp/lvno_safe/pubspec.yaml" ]; then cp /tmp/lvno_safe/pubspec.yaml pubspec.yaml; fi
+          if [ -f "/tmp/lvno_safe/google-services.json" ]; then cp /tmp/lvno_safe/google-services.json android/app/google-services.json; fi
+          if [ -f "/tmp/lvno_safe/AndroidManifest.xml" ]; then cp /tmp/lvno_safe/AndroidManifest.xml android/app/src/main/AndroidManifest.xml; fi
+
       - name: Install Dependencies
         run: flutter pub get
 
