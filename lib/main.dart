@@ -5,12 +5,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'smart_client_core.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
-  if (FirebaseAuth.instance.currentUser == null) {
-    await FirebaseAuth.instance.signInAnonymously();
-  }
+  // تشغيل الواجهة فوراً في اللحظة الأولى لمنع الشاشة البيضاء نهائياً
   runApp(const LvnoUnifiedWalletApp());
 }
 
@@ -31,9 +28,119 @@ class LvnoUnifiedWalletApp extends StatelessWidget {
       ),
       home: const Directionality(
         textDirection: TextDirection.rtl,
-        child: WalletDashboardScreen(),
+        child: SafeBootScreen(),
       ),
     );
+  }
+}
+
+class SafeBootScreen extends StatefulWidget {
+  const SafeBootScreen({super.key});
+
+  @override
+  State<SafeBootScreen> createState() => _SafeBootScreenState();
+}
+
+class _SafeBootScreenState extends State<SafeBootScreen> {
+  bool _isReady = false;
+  String? _errorMsg;
+
+  // سيقوم سكربت البناء باستبدال هذه القيم تلقائياً من ملف google-services.json
+  static const String _injectedApiKey = "INJECT_API_KEY";
+  static const String _injectedAppId = "INJECT_APP_ID";
+  static const String _injectedSenderId = "INJECT_SENDER_ID";
+  static const String _injectedProjectId = "netspay-1f0fc";
+
+  @override
+  void initState() {
+    super.initState();
+    _initCloud();
+  }
+
+  Future<void> _initCloud() async {
+    try {
+      if (Firebase.apps.isEmpty) {
+        if (_injectedApiKey.isNotEmpty && !_injectedApiKey.startsWith("INJECT_")) {
+          await Firebase.initializeApp(
+            options: const FirebaseOptions(
+              apiKey: _injectedApiKey,
+              appId: _injectedAppId,
+              messagingSenderId: _injectedSenderId,
+              projectId: _injectedProjectId,
+            ),
+          ).timeout(const Duration(seconds: 12));
+        } else {
+          await Firebase.initializeApp().timeout(const Duration(seconds: 12));
+        }
+      }
+
+      if (FirebaseAuth.instance.currentUser == null) {
+        await FirebaseAuth.instance.signInAnonymously().timeout(const Duration(seconds: 12));
+      }
+
+      if (mounted) {
+        setState(() => _isReady = true);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _errorMsg = e.toString());
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_errorMsg != null) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.wifi_off_rounded, color: Colors.amber, size: 56),
+                const SizedBox(height: 16),
+                const Text(
+                  "تعذر الاتصال الأولي بالسحابة",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  _errorMsg!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() => _errorMsg = null);
+                    _initCloud();
+                  },
+                  child: const Text("إعادة المحاولة"),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (!_isReady) {
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(color: Color(0xFF10B981)),
+              SizedBox(height: 16),
+              Text("جاري فتح محفظة نت سباي...", style: TextStyle(fontSize: 15)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return const WalletDashboardScreen();
   }
 }
 
@@ -45,8 +152,6 @@ class WalletDashboardScreen extends StatefulWidget {
 }
 
 class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
-  // يمكنك التبديل بين المعرفات التجريبية التي فتحناها في لوحة الأدمن:
-  // consumer_01 (مستفيد) | agent_01 (بقال) | dist_01 (موزع)
   String activeWalletId = "consumer_01";
   String activeHostId = "host_alhuda_01";
 
@@ -58,13 +163,8 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _initSmartEngine();
-  }
-
-  Future<void> _initSmartEngine() async {
     _engine = SmartClientEngine(walletId: activeWalletId, currentHostId: activeHostId);
-    await _engine.initializeEngine();
-    if (mounted) setState(() {});
+    _engine.initializeEngine();
   }
 
   void _switchDemoProfile(String newWalletId) {
@@ -85,7 +185,6 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
         elevation: 0,
         title: const Text('محفظة نت سباي الموحدة', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
         actions: [
-          // قائمة سريعة للتجربة بين الأدوار التي أنشأناها في لوحة الأدمن
           PopupMenuButton<String>(
             icon: const Icon(Icons.switch_account, color: Color(0xFF10B981)),
             onSelected: _switchDemoProfile,
@@ -100,26 +199,33 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
       body: StreamBuilder<DocumentSnapshot>(
         stream: db.collection('wallets').doc(activeWalletId).snapshots(),
         builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(child: Text("خطأ في قراءة المحفظة: ${snapshot.error}"));
+          }
           if (!snapshot.hasData || !snapshot.data!.exists) {
             return const Center(
-              child: Text("جاري تحميل المحفظة... تأكد من ضغط زر Bootstrap في لوحة الأدمن"),
+              child: Padding(
+                padding: EdgeInsets.all(24.0),
+                child: Text(
+                  "جاري تحميل بيانات المحفظة... تأكد من الضغط على زر (Bootstrap) في لوحة الأدمن",
+                  textAlign: TextAlign.center,
+                ),
+              ),
             );
           }
 
           final wallet = snapshot.data!.data() as Map<String, dynamic>;
           final String role = (wallet['role'] ?? 'consumer').toString();
-          final int balance = (wallet['balance_yer'] ?? 0) as int;
-          final int dailyUsed = (wallet['daily_transferred_today'] ?? 0) as int;
+          final int balance = ((wallet['balance_yer'] ?? 0) as num).toInt();
+          final int dailyUsed = ((wallet['daily_transferred_today'] ?? 0) as num).toInt();
 
           return SingleChildScrollView(
             padding: const EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 1. بطاقة الرصيد والهوية الرقمية
                 _buildBalanceCard(wallet['display_name'] ?? activeWalletId, role, balance, dailyUsed),
                 const SizedBox(height: 16),
-
                 if (_statusMessage.isNotEmpty)
                   Container(
                     margin: const EdgeInsets.only(bottom: 16),
@@ -130,20 +236,11 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
                     ),
                     child: Text(_statusMessage, style: const TextStyle(fontSize: 13)),
                   ),
-
-                // 2. زر تشغيل الإنترنت الذكي (يظهر للمستفيد)
                 _buildSmartInternetToggleCard(),
                 const SizedBox(height: 16),
-
-                // 3. بطاقة خاصة بصاحب الشبكة فقط (تقرأ عداد الـ WAN الصافي بدون ذكر الكاش)
-                if (role == 'host' || activeWalletId == 'dist_01')
-                  _buildHostMeterCard(db),
-
-                // 4. نموذج التحويل الفوري / شحن البقال (مع خصم عمولة 10% آلياً للبقال)
+                if (role == 'host' || activeWalletId == 'dist_01') _buildHostMeterCard(db),
                 _buildTransferCard(role),
                 const SizedBox(height: 16),
-
-                // 5. الكود الثابت (Static QR) لاستلام الرصيد
                 _buildStaticQrCard(activeWalletId),
               ],
             ),
@@ -181,25 +278,16 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
               Text(name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.black26,
-                  borderRadius: BorderRadius.circular(20),
-                ),
+                decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(20)),
                 child: Text(roleNames[role] ?? role, style: const TextStyle(fontSize: 11, color: Color(0xFF6EE7B7))),
               ),
             ],
           ),
           const SizedBox(height: 16),
           const Text("الرصيد المتاح", style: TextStyle(fontSize: 12, color: Colors.white70)),
-          Text(
-            "$balance ريال",
-            style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: Colors.white),
-          ),
+          Text("$balance ريال", style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: Colors.white)),
           const SizedBox(height: 8),
-          Text(
-            "المعرف: $activeWalletId  |  المستخدم من السقف اليومي: $dailyUsed ريال",
-            style: const TextStyle(fontSize: 11, color: Colors.white60),
-          ),
+          Text("المعرف: $activeWalletId | المسحوب اليوم: $dailyUsed ريال", style: const TextStyle(fontSize: 11, color: Colors.white60)),
         ],
       ),
     );
@@ -208,10 +296,7 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
   Widget _buildSmartInternetToggleCard() {
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E293B),
-        borderRadius: BorderRadius.circular(16),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
       child: Column(
         children: [
           Row(
@@ -223,10 +308,7 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
                   const Text("اتصال الشبكة الموحد", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                   Text(
                     _engine.isVpnActive ? "متصل الآن عبر النفق الذكي" : "الاتصال متوقف",
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: _engine.isVpnActive ? const Color(0xFF10B981) : Colors.grey,
-                    ),
+                    style: TextStyle(fontSize: 12, color: _engine.isVpnActive ? const Color(0xFF10B981) : Colors.grey),
                   ),
                 ],
               ),
@@ -245,7 +327,6 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
             ],
           ),
           const Divider(color: Colors.white12, height: 20),
-          // زر اختباري لإرسال نبضة فورية ومشاهدتها تتغير في لوحة التحكم بالمتصفح
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
@@ -253,8 +334,8 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
               label: const Text("اختبار إرسال نبضة استهلاك فورية للوحة القيادة", style: TextStyle(fontSize: 12)),
               onPressed: () async {
                 await _engine.sendUsageHeartbeatDirect(
-                  extraWanBytes: 800 * 1024 * 1024, // 800 MB WAN
-                  extraCacheBytes: 200 * 1024 * 1024, // 200 MB local bus
+                  extraWanBytes: 800 * 1024 * 1024,
+                  extraCacheBytes: 200 * 1024 * 1024,
                 );
                 setState(() {
                   _statusMessage = "تم إرسال نبضة استهلاك (1000 MB) وتحديث لوحة القيادة لحظياً!";
@@ -274,7 +355,7 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
         if (!snap.hasData || !snap.data!.exists) return const SizedBox.shrink();
         final h = snap.data!.data() as Map<String, dynamic>;
         final num wanMb = (h['current_month_wan_mb'] ?? 0) as num;
-        final int dueYer = (h['amount_due_yer'] ?? 0) as int;
+        final int dueYer = ((h['amount_due_yer'] ?? 0) as num).toInt();
 
         return Container(
           margin: const EdgeInsets.only(bottom: 16),
@@ -312,10 +393,7 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
     final bool isAgent = role == 'agent';
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E293B),
-        borderRadius: BorderRadius.circular(16),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -359,8 +437,7 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
                   amountYer: amt,
                 );
                 setState(() {
-                  _statusMessage =
-                      "✅ تم التحويل بنجاح! المخصوم الصافي: ${res['net_deducted_yer']} ريال (العمولة: ${res['agent_commission_yer']} ريال)";
+                  _statusMessage = "✅ تم التحويل! المخصوم الصافي: ${res['net_deducted_yer']} ريال (العمولة: ${res['agent_commission_yer']} ريال)";
                 });
               } catch (e) {
                 setState(() => _statusMessage = "❌ خطأ: ${e.toString()}");
@@ -376,10 +453,7 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
   Widget _buildStaticQrCard(String walletId) {
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E293B),
-        borderRadius: BorderRadius.circular(16),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
       child: Column(
         children: [
           const Text("الكود الثابت لاستلام الرصيد (Static QR)", style: TextStyle(fontWeight: FontWeight.bold)),
@@ -387,11 +461,7 @@ class _WalletDashboardScreenState extends State<WalletDashboardScreen> {
           Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
-            child: QrImageView(
-              data: walletId,
-              version: QrVersions.auto,
-              size: 150.0,
-            ),
+            child: QrImageView(data: walletId, version: QrVersions.auto, size: 150.0),
           ),
           const SizedBox(height: 8),
           Text(walletId, style: const TextStyle(fontFamily: 'monospace', color: Colors.white70)),
