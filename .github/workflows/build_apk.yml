@@ -24,271 +24,47 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Build Clean Project & Inject Firebase Options Directly
+      - name: Setup Safe Build Environment
+        run: |
+          mkdir -p /tmp/backup/lib /tmp/backup/kotlin
+          find . -maxdepth 3 -name "*.dart" -exec cp {} /tmp/backup/lib/ \; || true
+          find . -maxdepth 6 -name "*.kt" -exec cp {} /tmp/backup/kotlin/ \; || true
+          find . -maxdepth 4 -name "google-services.json" -exec cp {} /tmp/backup/google-services.json \; || true
+          if [ -f "pubspec.yaml" ]; then cp pubspec.yaml /tmp/backup/; fi
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then cp android/app/src/main/AndroidManifest.xml /tmp/backup/; fi
+
+          flutter create --org com.lvno --project-name smartclient . --overwrite
+
+          if [ -f "/tmp/backup/pubspec.yaml" ]; then cp /tmp/backup/pubspec.yaml pubspec.yaml; fi
+          if [ "$(ls -A /tmp/backup/lib)" ]; then cp /tmp/backup/lib/*.dart lib/; fi
+          if [ -f "/tmp/backup/google-services.json" ]; then cp /tmp/backup/google-services.json android/app/google-services.json; fi
+          if [ -f "/tmp/backup/AndroidManifest.xml" ]; then cp /tmp/backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml; fi
+
+          mkdir -p android/app/src/main/kotlin/com/lvno/smartclient
+          if [ "$(ls -A /tmp/backup/kotlin)" ]; then cp /tmp/backup/kotlin/*.kt android/app/src/main/kotlin/com/lvno/smartclient/; fi
+
+      - name: Inject Firebase Keys & MinSdk 23
         shell: python
         run: |
-          import os, shutil, json, subprocess, re
+          import os, json, re
+          if os.path.exists("android/app/google-services.json") and os.path.exists("lib/main.dart"):
+              gs = json.load(open("android/app/google-services.json"))
+              proj = gs.get("project_info", {})
+              cli = gs.get("client", [{}])[0]
+              api_key = cli.get("api_key", [{}])[0].get("current_key", "")
+              app_id = cli.get("client_info", {}).get("mobilesdk_app_id", "")
+              sender_id = proj.get("project_number", "")
+              m = open("lib/main.dart").read()
+              m = m.replace("INJECT_API_KEY", api_key).replace("INJECT_APP_ID", app_id).replace("INJECT_SENDER_ID", sender_id)
+              open("lib/main.dart", "w").write(m)
+          for g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
+              if os.path.exists(g):
+                  t = open(g).read()
+                  t = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", t)
+                  t = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", t)
+                  open(g, "w").write(t)
 
-          # 1. إصلاح أي امتداد .txt مخفي
-          for root, dirs, files in os.walk("."):
-              for f in files:
-                  if f.endswith(".txt"):
-                      os.rename(os.path.join(root, f), os.path.join(root, f[:-4]))
-
-          # 2. حفظ نسخة احتياطية من ملفاتنا
-          os.makedirs("/tmp/lvno_bak/lib", exist_ok=True)
-          os.makedirs("/tmp/lvno_bak/kt", exist_ok=True)
-
-          for root, dirs, files in os.walk("."):
-              if ".git" in root: continue
-              for f in files:
-                  full = os.path.join(root, f)
-                  if f.endswith(".dart"):
-                      shutil.copy2(full, os.path.join("/tmp/lvno_bak/lib", f))
-                  elif f.endswith(".kt"):
-                      shutil.copy2(full, os.path.join("/tmp/lvno_bak/kt", f))
-                  elif f == "google-services.json":
-                      shutil.copy2(full, "/tmp/lvno_bak/google-services.json")
-
-          # 3. استخراج مفاتيح Firebase مباشرة من google-services.json لمنع الشاشة البيضاء
-          api_key, app_id, project_id, sender_id = "", "", "netspay-1f0fc", ""
-          if os.path.exists("/tmp/lvno_bak/google-services.json"):
-              gs = json.load(open("/tmp/lvno_bak/google-services.json"))
-              project_id = gs.get("project_info", {}).get("project_id", "netspay-1f0fc")
-              sender_id = gs.get("project_info", {}).get("project_number", "")
-              clients = gs.get("client", [])
-              if clients:
-                  app_id = clients[0].get("client_info", {}).get("mobilesdk_app_id", "")
-                  api_keys = clients[0].get("api_key", [])
-                  if api_keys:
-                      api_key = api_keys[0].get("current_key", "")
-
-          # 4. إنشاء هيكل Flutter قياسي نظيف
-          for item in os.listdir("."):
-              if item not in [".git", ".github"]:
-                  if os.path.isdir(item): shutil.rmtree(item)
-                  else: os.remove(item)
-
-          subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
-
-          # 5. كتابة pubspec.yaml
-          open("pubspec.yaml", "w").write("""name: smartclient
-description: LVNO SmartClient Ecosystem
-publish_to: 'none'
-version: 1.0.1+2
-
-environment:
-  sdk: '>=3.2.0 <4.0.0'
-
-dependencies:
-  flutter:
-    sdk: flutter
-  firebase_core: ^3.6.0
-  firebase_auth: ^5.3.1
-  cloud_firestore: ^5.4.4
-  http: ^1.2.2
-  crypto: ^3.0.5
-  qr_flutter: ^4.1.0
-
-flutter:
-  uses-material-design: true
-""")
-
-          # 6. استعادة smart_client_core.dart وملفات الكوتلن
-          for f in os.listdir("/tmp/lvno_bak/lib"):
-              shutil.copy2(os.path.join("/tmp/lvno_bak/lib", f), os.path.join("lib", f))
-
-          kt_dir = "android/app/src/main/kotlin/com/lvno/smartclient"
-          os.makedirs(kt_dir, exist_ok=True)
-          for f in os.listdir("/tmp/lvno_bak/kt"):
-              shutil.copy2(os.path.join("/tmp/lvno_bak/kt", f), os.path.join(kt_dir, f))
-
-          if os.path.exists("/tmp/lvno_bak/google-services.json"):
-              shutil.copy2("/tmp/lvno_bak/google-services.json", "android/app/google-services.json")
-
-          # 7. تحديث main.dart ليفتح الواجهة فوراً بدون شاشة بيضاء أبداً
-          main_dart = f"""import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:qr_flutter/qr_flutter.dart';
-import 'smart_client_core.dart';
-
-void main() {{
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const LvnoUnifiedWalletApp());
-}}
-
-class LvnoUnifiedWalletApp extends StatelessWidget {{
-  const LvnoUnifiedWalletApp({{super.key}});
-
-  @override
-  Widget build(BuildContext context) {{
-    return MaterialApp(
-      title: 'محفظة نت سباي',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0B1120),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF10B981),
-          secondary: Color(0xFF3B82F6),
-        ),
-      ),
-      home: const Directionality(
-        textDirection: TextDirection.rtl,
-        child: SafeBootWrapper(),
-      ),
-    );
-  }}
-}}
-
-class SafeBootWrapper extends StatefulWidget {{
-  const SafeBootWrapper({{super.key}});
-
-  @override
-  State<SafeBootWrapper> createState() => _SafeBootWrapperState();
-}}
-
-class _SafeBootWrapperState extends State<SafeBootWrapper> {{
-  bool _ready = false;
-  String? _bootError;
-
-  @override
-  void initState() {{
-    super.initState();
-    _bootFirebase();
-  }}
-
-  Future<void> _bootFirebase() async {{
-    try {{
-      if (Firebase.apps.isEmpty) {{
-        if ("{api_key}".isNotEmpty) {{
-          await Firebase.initializeApp(
-            options: const FirebaseOptions(
-              apiKey: "{api_key}",
-              appId: "{app_id}",
-              messagingSenderId: "{sender_id}",
-              projectId: "{project_id}",
-            ),
-          );
-        }} else {{
-          await Firebase.initializeApp();
-        }}
-      }}
-      if (FirebaseAuth.instance.currentUser == null) {{
-        await FirebaseAuth.instance.signInAnonymously();
-      }}
-      if (mounted) setState(() => _ready = true);
-    }} catch (e) {{
-      if (mounted) setState(() => _bootError = e.toString());
-    }}
-  }}
-
-  @override
-  Widget build(BuildContext context) {{
-    if (_bootError != null) {{
-      return Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.error_outline, color: Colors.amber, size: 56),
-                const SizedBox(height: 16),
-                const Text("تنبيه اتصال بالسحابة", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-                Text(_bootError!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                const SizedBox(height: 20),
-                ElevatedButton(
-                  onPressed: () {{
-                    setState(() => _bootError = null);
-                    _bootFirebase();
-                  }},
-                  child: const Text("إعادة المحاولة"),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }}
-    if (!_ready) {{
-      return const Scaffold(
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(color: Color(0xFF10B981)),
-              SizedBox(height: 16),
-              Text("جاري الاتصال بسحابة نت سباي...", style: TextStyle(fontSize: 14)),
-            ],
-          ),
-        ),
-      );
-    }}
-    return const WalletDashboardScreen();
-  }}
-}}
-"""
-          # دمج بقية كود WalletDashboardScreen من ملفنا السابق
-          old_main = open("lib/main.dart").read()
-          if "class WalletDashboardScreen" in old_main:
-              dashboard_part = "class WalletDashboardScreen" + old_main.split("class WalletDashboardScreen", 1)[1]
-              open("lib/main.dart", "w").write(main_dart + "\n" + dashboard_part)
-
-          # 8. كتابة AndroidManifest.xml القياسي مع تصريح VpnTunnelService
-          open("android/app/src/main/AndroidManifest.xml", "w").write("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
-
-    <application
-        android:label="محفظة نت سباي"
-        android:name="${applicationName}"
-        android:usesCleartextTraffic="true"
-        android:icon="@mipmap/ic_launcher">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:launchMode="singleTop"
-            android:theme="@style/LaunchTheme"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-            android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
-            <meta-data
-              android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme" />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
-            </intent-filter>
-        </activity>
-
-        <service
-            android:name=".VpnTunnelService"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            android:foregroundServiceType="specialUse"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.net.VpnService"/>
-            </intent-filter>
-        </service>
-
-        <meta-data android:name="flutterEmbedding" android:value="2" />
-    </application>
-</manifest>""")
-
-          # 9. رفع minSdk إلى 23 في Gradle
-          for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              if os.path.exists(app_g):
-                  txt = open(app_g).read()
-                  txt = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", txt)
-                  txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
-                  open(app_g, "w").write(txt)
-
-      - name: Install Flutter Dependencies
+      - name: Install Dependencies
         run: flutter pub get
 
       - name: Build Release APK
