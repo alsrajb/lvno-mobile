@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "498553840071",
+    "project_id": "netspay-1f0fc",
+    "storage_bucket": "netspay-1f0fc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:498553840071:android:791781e8ea9d2402ccf9e2",
+        "android_client_info": {
+          "package_name": "com.lvno.smartclient"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCE7bLcn4TtkwEmlsmd-kJNWyFO4Xc8SiA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
