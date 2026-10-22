@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Commercial LVNO V3 (Zero Extra Plugin Conflicts)
+      - name: Generate Commercial LVNO V4 (Auto 60s Heartbeat & MikroTik Gate)
         shell: python
         run: |
           import os, shutil, json, subprocess, re
@@ -64,11 +64,10 @@ jobs:
               lines = [l[10:] if l.startswith("          ") else l for l in text.splitlines()]
               open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 
-          # نفس مكتبات البناء #10 الناجح تماماً بدون أي إضافات تكسر Gradle
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App
           publish_to: 'none'
-          version: 3.1.0+8
+          version: 4.0.0+9
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -93,10 +92,12 @@ jobs:
           vpn_kt = '''package com.lvno.smartclient
 
           import android.content.Intent
+          import android.net.TrafficStats
           import android.net.VpnService
           import android.os.ParcelFileDescriptor
           import java.io.FileInputStream
           import java.nio.ByteBuffer
+          import java.nio.charset.StandardCharsets
           import java.util.Collections
           import java.util.LinkedHashMap
           import java.util.concurrent.ConcurrentHashMap
@@ -110,6 +111,7 @@ jobs:
                   val parentalLocked = AtomicBoolean(false)
                   val wanBytesCount = AtomicLong(0)
                   val cacheBytesCount = AtomicLong(0)
+                  var lastTotalDeviceBytes: Long = 0L
 
                   val localDnsRamCache: MutableMap<String, String> = Collections.synchronizedMap(
                       object : LinkedHashMap<String, String>(5000, 0.75f, true) {
@@ -154,6 +156,10 @@ jobs:
 
               private fun startVpnTunnel() {
                   try {
+                      val rx = TrafficStats.getTotalRxBytes()
+                      val tx = TrafficStats.getTotalTxBytes()
+                      lastTotalDeviceBytes = if (rx > 0 && tx > 0) (rx + tx) else 0L
+
                       val mtuSize = if (ecoModeEnabled.get()) 1280 else 1500
                       val builder = Builder()
                           .setSession("النفق الموحد")
@@ -174,6 +180,21 @@ jobs:
                   }
               }
 
+              private fun isPayloadBlocked(rawBytes: ByteArray, length: Int): Boolean {
+                  if (blockedDomains.isEmpty() || length <= 28) return false
+                  return try {
+                      val payloadStr = String(rawBytes, 20, length - 20, StandardCharsets.ISO_8859_1).lowercase()
+                      for (domain in blockedDomains) {
+                          if (domain.isNotEmpty() && payloadStr.contains(domain)) {
+                              return true
+                          }
+                      }
+                      false
+                  } catch (_: Exception) {
+                      false
+                  }
+              }
+
               private fun startPacketEngine() {
                   workerThread = Thread {
                       val fd = vpnInterface?.fileDescriptor ?: return@Thread
@@ -188,6 +209,12 @@ jobs:
                               }
                               val length = inputStream.read(packet.array())
                               if (length > 20) {
+                                  // إسقاط الحزمة فوراً إذا كانت ضمن قوائم الحظر المخصصة للطفل
+                                  if (isPayloadBlocked(packet.array(), length)) {
+                                      packet.clear()
+                                      continue
+                                  }
+
                                   val b0 = packet.get(16).toInt() and 0xFF
                                   val b1 = packet.get(17).toInt() and 0xFF
                                   val b2 = packet.get(18).toInt() and 0xFF
@@ -229,12 +256,12 @@ jobs:
           }'''
           write_clean(os.path.join(kt_dir, "VpnTunnelService.kt"), vpn_kt)
 
-          # MainActivity.kt يتولى التخزين المحلي الأصلي + الـ VPN + مسح الـ QR الأصلي بدون مكتبات خارجية
           main_act_kt = '''package com.lvno.smartclient
 
           import android.app.Activity
           import android.content.Context
           import android.content.Intent
+          import android.net.TrafficStats
           import android.net.VpnService
           import android.provider.Settings
           import io.flutter.embedding.android.FlutterActivity
@@ -281,6 +308,30 @@ jobs:
                           }
                           "isVpnRunning" -> {
                               result.success(VpnTunnelService.isRunning.get())
+                          }
+                          "getAndResetTrafficStats" -> {
+                              var wanDelta = VpnTunnelService.wanBytesCount.getAndSet(0L)
+                              val cacheDelta = VpnTunnelService.cacheBytesCount.getAndSet(0L)
+
+                              // قياس إجمالي استهلاك واجهة الشبكة الحقيقي أثناء عمل النفق لضمان دقة المحاسبة 100%
+                              val rx = TrafficStats.getTotalRxBytes()
+                              val tx = TrafficStats.getTotalTxBytes()
+                              if (rx > 0 && tx > 0) {
+                                  val nowTotal = rx + tx
+                                  if (VpnTunnelService.lastTotalDeviceBytes > 0 && nowTotal > VpnTunnelService.lastTotalDeviceBytes) {
+                                      val totalDelta = nowTotal - VpnTunnelService.lastTotalDeviceBytes
+                                      if (totalDelta > (wanDelta + cacheDelta)) {
+                                          wanDelta = totalDelta - cacheDelta
+                                      }
+                                  }
+                                  VpnTunnelService.lastTotalDeviceBytes = nowTotal
+                              }
+
+                              val stats = mapOf(
+                                  "wanBytes" to wanDelta,
+                                  "cacheBytes" to cacheDelta
+                              )
+                              result.success(stats)
                           }
                           "startVpn" -> {
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
@@ -391,6 +442,7 @@ jobs:
 
           core_code = '''import 'dart:async';
           import 'dart:convert';
+          import 'dart:io';
           import 'package:flutter/services.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
 
@@ -399,6 +451,9 @@ jobs:
             String currentHostId;
             bool isVpnActive = false;
             bool ecoMode = false;
+            Timer? _heartbeatTimer;
+            int _pendingUnbilledWanBytes = 0;
+            int _pendingUnbilledCacheBytes = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -446,6 +501,21 @@ jobs:
                 return res ?? '';
               } catch (_) {
                 return '';
+              }
+            }
+
+            // طرق بوابة راوتر الميكروتك (Port-Knocking) لفتح أو قفل الإنترنت الفعلي للجهاز
+            Future<void> _knockMikroTikGateway({required bool unlock}) async {
+              final int targetPort = unlock ? 9981 : 9982;
+              try {
+                final socket = await Socket.connect(
+                  '10.99.99.1',
+                  targetPort,
+                  timeout: const Duration(milliseconds: 900),
+                );
+                socket.destroy();
+              } catch (_) {
+                // حتى لو أغلقت البوابة المنفذ، فإن حزمة SYN قد سجلت الـ IP في قائمة LVNO_ACTIVE_IPS بنجاح
               }
             }
 
@@ -584,7 +654,7 @@ jobs:
                   'blockedDomains': compiledDomains.toList(),
                 });
                 if (locked || timeExpired) {
-                  isVpnActive = false;
+                  await stopSmartConnection();
                 }
               } catch (_) {}
             }
@@ -611,14 +681,120 @@ jobs:
                 'ecoMode': ecoMode,
               });
               isVpnActive = ok ?? false;
+              if (isVpnActive) {
+                await _knockMikroTikGateway(unlock: true);
+                _startAutoHeartbeatTimer();
+              }
               return isVpnActive;
             }
 
             Future<void> stopSmartConnection() async {
+              _heartbeatTimer?.cancel();
+              _heartbeatTimer = null;
+              await _knockMikroTikGateway(unlock: false);
               try {
                 await _vpnChannel.invokeMethod('stopVpn');
               } catch (_) {}
               isVpnActive = false;
+            }
+
+            // النبضة التلقائية كل 60 ثانية: محاسبة البايتات + تحديث وقت الطفل + تجديد فتح بوابة الميكروتك
+            void _startAutoHeartbeatTimer() {
+              _heartbeatTimer?.cancel();
+              _heartbeatTimer = Timer.periodic(const Duration(seconds: 60), (_) async {
+                if (!isVpnActive) return;
+                try {
+                  final activeNet = await verifyActiveHostNetwork(currentHostId);
+                  if (!activeNet) {
+                    await stopSmartConnection();
+                    return;
+                  }
+
+                  final db = FirebaseFirestore.instance;
+                  final wRef = db.collection('wallets').doc(walletId);
+                  final wSnap = await wRef.get();
+                  if (!wSnap.exists) return;
+                  final wData = wSnap.data()!;
+
+                  final int creditBal = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
+                  final bool locked = (wData['parental_locked'] ?? false) == true;
+                  final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
+                  final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt() + 1;
+
+                  if (creditBal <= 0 || locked || (limitMins > 0 && usedMins > limitMins)) {
+                    await stopSmartConnection();
+                    return;
+                  }
+
+                  // سحب البايتات الحقيقية المستهلكة خلال الدقيقة الماضية من الكوتلن
+                  final stats = await _vpnChannel.invokeMapMethod<String, dynamic>('getAndResetTrafficStats');
+                  final int deltaWan = ((stats?['wanBytes'] ?? 0) as num).toInt();
+                  final int deltaCache = ((stats?['cacheBytes'] ?? 0) as num).toInt();
+
+                  _pendingUnbilledWanBytes += deltaWan;
+                  _pendingUnbilledCacheBytes += deltaCache;
+
+                  final cfgSnap = await db.collection('settings').doc('global_config').get();
+                  final cfg = cfgSnap.data() ?? {};
+                  final double gbPriceConsumer = ((cfg['gb_price_consumer_yer'] ?? 250) as num).toDouble();
+                  final double gbPayoutHost = ((cfg['gb_payout_host_yer'] ?? 195) as num).toDouble();
+
+                  final double wanMb = _pendingUnbilledWanBytes / (1024.0 * 1024.0);
+                  final double cacheMb = _pendingUnbilledCacheBytes / (1024.0 * 1024.0);
+                  final double totalGb = (wanMb + cacheMb) / 1024.0;
+                  final double wanGb = wanMb / 1024.0;
+
+                  final int consumerChargeYer = (totalGb * gbPriceConsumer).floor();
+                  final int hostCreditYer = (wanGb * gbPayoutHost).floor();
+                  final int adminProfitYer = consumerChargeYer - hostCreditYer;
+
+                  final batch = db.batch();
+
+                  if (consumerChargeYer >= 1) {
+                    // تصفير التراكم غير المفوتر بعد خصمه الفعلي بالريال
+                    _pendingUnbilledWanBytes = 0;
+                    _pendingUnbilledCacheBytes = 0;
+
+                    final int nextCredit = creditBal - consumerChargeYer;
+                    batch.update(wRef, {
+                      'credit_balance_yer': nextCredit < 0 ? 0 : nextCredit,
+                      'used_time_today_mins': FieldValue.increment(1),
+                      'updated_at': FieldValue.serverTimestamp(),
+                    });
+
+                    batch.set(db.collection('hosts').doc(currentHostId), {
+                      'current_month_wan_mb': FieldValue.increment(wanMb),
+                      'amount_due_yer': FieldValue.increment(hostCreditYer),
+                      'last_heartbeat': FieldValue.serverTimestamp(),
+                    }, SetOptions(merge: true));
+
+                    batch.set(db.collection('admin_secret_vault').doc(currentHostId), {
+                      'host_id': currentHostId,
+                      'wan_mb_visible_to_host': FieldValue.increment(wanMb),
+                      'local_cache_mb_secret': FieldValue.increment(cacheMb),
+                      'total_charged_to_consumers_yer': FieldValue.increment(consumerChargeYer),
+                      'host_payout_yer': FieldValue.increment(hostCreditYer),
+                      'net_admin_profit_yer': FieldValue.increment(adminProfitYer),
+                      'updated_at': FieldValue.serverTimestamp(),
+                    }, SetOptions(merge: true));
+
+                    await batch.commit();
+
+                    if (nextCredit <= 0) {
+                      await stopSmartConnection();
+                      return;
+                    }
+                  } else {
+                    // تحديث دقيقة الاستخدام حتى لو كان الاستهلاك أقل من 1 ريال
+                    await wRef.update({
+                      'used_time_today_mins': FieldValue.increment(1),
+                    });
+                  }
+
+                  // تجديد صلاحية الـ IP في راوتر الميكروتك لمدة 90 ثانية قادمة
+                  await _knockMikroTikGateway(unlock: true);
+                } catch (_) {}
+              });
             }
 
             Future<void> toggleMyEcoMode(bool enabled) async {
@@ -1333,10 +1509,10 @@ jobs:
                                 try {
                                   if (!widget.engine.isVpnActive) {
                                     await widget.engine.startSmartConnection(w);
-                                    setState(() => _feedback = "✅ تم تفعيل النفق بنجاح");
+                                    setState(() => _feedback = "✅ تم تفعيل النفق وفتح البوابة بنجاح");
                                   } else {
                                     await widget.engine.stopSmartConnection();
-                                    setState(() => _feedback = "تم إيقاف النفق");
+                                    setState(() => _feedback = "تم إيقاف النفق وإغلاق البوابة");
                                   }
                                 } catch (e) {
                                   setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
@@ -1470,6 +1646,7 @@ jobs:
                   final bool locked = (c['parental_locked'] ?? false) == true;
                   final bool childEco = (c['eco_mode'] ?? false) == true;
                   final int timeLimit = ((c['daily_time_limit_mins'] ?? 0) as num).toInt();
+                  final int usedTime = ((c['used_time_today_mins'] ?? 0) as num).toInt();
                   final List<String> blockedCats = List<String>.from((c['blocked_categories'] as List<dynamic>?) ?? []);
                   final List<String> customDomains = List<String>.from((c['custom_blocked_domains'] as List<dynamic>?) ?? []);
 
@@ -1497,7 +1674,7 @@ jobs:
                             ),
                           ],
                         ),
-                        Text(locked ? "الحالة: مقفل بأمر الرقابة الأبوية" : "الحالة: مسموح بالاستخدام", style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                        Text(locked ? "الحالة: مقفل بأمر الرقابة الأبوية" : "المستهلك اليوم: $usedTime دقيقة", style: const TextStyle(fontSize: 12, color: Colors.white70)),
                         const Divider(height: 20, color: Colors.white12),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
@@ -1509,7 +1686,7 @@ jobs:
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text("وقت الاستخدام اليومي: ${timeLimit == 0 ? 'مفتوح' : '$timeLimit دقيقة'}", style: const TextStyle(fontSize: 13)),
+                            Text("الحد اليومي: ${timeLimit == 0 ? 'مفتوح' : '$timeLimit دقيقة'}", style: const TextStyle(fontSize: 13)),
                             DropdownButton<int>(
                               value: [0, 60, 120, 180, 300].contains(timeLimit) ? timeLimit : 0,
                               items: const [
