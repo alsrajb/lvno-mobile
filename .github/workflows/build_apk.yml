@@ -67,7 +67,7 @@ jobs:
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App V5
           publish_to: 'none'
-          version: 5.0.1+11
+          version: 5.0.2+12
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -97,7 +97,6 @@ jobs:
           import android.os.ParcelFileDescriptor
           import java.io.FileInputStream
           import java.nio.ByteBuffer
-          import java.nio.charset.StandardCharsets
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
           import java.util.concurrent.atomic.AtomicLong
@@ -107,7 +106,7 @@ jobs:
                   val isRunning = AtomicBoolean(false)
                   val ecoModeEnabled = AtomicBoolean(false)
                   val parentalLocked = AtomicBoolean(false)
-                  val tunnelInspectorBytes = AtomicLong(0)
+                  val tunnelInspectorBytes = AtomicLong(0L)
                   var lastOsTotalBytes: Long = 0L
                   val blockedDomains = ConcurrentHashMap.newKeySet<String>()
               }
@@ -146,7 +145,7 @@ jobs:
                   try {
                       val rx = TrafficStats.getTotalRxBytes()
                       val tx = TrafficStats.getTotalTxBytes()
-                      lastOsTotalBytes = if (rx > 0 && tx > 0) (rx + tx) else 0L
+                      lastOsTotalBytes = if (rx > 0L && tx > 0L) (rx + tx) else 0L
                       tunnelInspectorBytes.set(0L)
 
                       val mtuSize = if (ecoModeEnabled.get()) 1280 else 1500
@@ -172,7 +171,7 @@ jobs:
               private fun isPayloadBlocked(rawBytes: ByteArray, length: Int): Boolean {
                   if (blockedDomains.isEmpty() || length <= 28) return false
                   return try {
-                      val payloadStr = String(rawBytes, 20, length - 20, StandardCharsets.ISO_8859_1).lowercase()
+                      val payloadStr = rawBytes.decodeToString(20, length, throwOnInvalidSequence = false).lowercase()
                       for (domain in blockedDomains) {
                           if (domain.isNotEmpty() && payloadStr.contains(domain)) {
                               return true
@@ -245,7 +244,6 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
-          import java.net.InetAddress
           import java.net.InetSocketAddress
           import java.net.Socket
           import java.util.ArrayList
@@ -286,15 +284,13 @@ jobs:
                           }
                           "verifyMikroTikHandshake" -> {
                               val gatewayIp = call.argument<String>("gatewayIp") ?: "10.99.99.1"
-                              val expectedHostDomain = call.argument<String>("hostDomain") ?: "gateway.lvno.local"
                               Thread {
                                   var verified = false
                                   try {
                                       val sock = Socket()
                                       sock.connect(InetSocketAddress(gatewayIp, 53), 1200)
                                       sock.close()
-                                      val resolved = InetAddress.getByName(expectedHostDomain).hostAddress
-                                      verified = (resolved == gatewayIp)
+                                      verified = true
                                   } catch (_: Exception) {
                                       try {
                                           val s2 = Socket()
@@ -329,9 +325,9 @@ jobs:
                               var delta = VpnTunnelService.tunnelInspectorBytes.getAndSet(0L)
                               val rx = TrafficStats.getTotalRxBytes()
                               val tx = TrafficStats.getTotalTxBytes()
-                              if (rx > 0 && tx > 0) {
+                              if (rx > 0L && tx > 0L) {
                                   val nowTotal = rx + tx
-                                  if (VpnTunnelService.lastOsTotalBytes > 0 && nowTotal > VpnTunnelService.lastOsTotalBytes) {
+                                  if (VpnTunnelService.lastOsTotalBytes > 0L && nowTotal > VpnTunnelService.lastOsTotalBytes) {
                                       val osDelta = nowTotal - VpnTunnelService.lastOsTotalBytes
                                       if (osDelta > delta) {
                                           delta = osDelta
@@ -339,7 +335,8 @@ jobs:
                                   }
                                   VpnTunnelService.lastOsTotalBytes = nowTotal
                               }
-                              result.success(delta.toInt())
+                              val safeInt = if (delta > 2000000000L) 2000000000 else delta.toInt()
+                              result.success(safeInt)
                           }
                           "startVpn" -> {
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
@@ -603,7 +600,6 @@ jobs:
               if (requirePhysicalRouter && (data['enforce_physical_router_check'] ?? false) == true) {
                 final bool routerReachable = await _vpnChannel.invokeMethod<bool>('verifyMikroTikHandshake', {
                   'gatewayIp': gatewayIp,
-                  'hostDomain': 'gateway.lvno.local',
                 }) ?? false;
                 if (!routerReachable) {
                   return {'ok': false, 'reason': 'أنت غير متصل بواي فاي راوتر الميكروتك المفعل ($gatewayIp)'};
@@ -748,16 +744,6 @@ jobs:
                   final String ownerWalletId = (hData['owner_wallet_id'] ?? '').toString().trim();
                   final bool autoSettle = (hData['auto_transfer_to_wallet'] ?? false) == true;
 
-                  bool ownerExists = false;
-                  if (autoSettle && ownerWalletId.isNotEmpty) {
-                    if (ownerWalletId == walletId) {
-                      ownerExists = true;
-                    } else {
-                      final ownerSnap = await tx.get(db.collection('wallets').doc(ownerWalletId));
-                      ownerExists = ownerSnap.exists;
-                    }
-                  }
-
                   if ((hData['status'] ?? 'inactive') != 'active' || (hData['manual_admin_approved'] ?? true) != true) {
                     throw Exception("الشبكة غير مفعلة يدوياً من النظام");
                   }
@@ -783,12 +769,12 @@ jobs:
                     'updated_at': FieldValue.serverTimestamp(),
                   });
 
-                  if (autoSettle && ownerExists && ownerWalletId.isNotEmpty) {
+                  if (autoSettle && ownerWalletId.isNotEmpty) {
                     final ownerRef = db.collection('wallets').doc(ownerWalletId);
-                    tx.update(ownerRef, {
+                    tx.set(ownerRef, {
                       'cash_balance_yer': FieldValue.increment(hostShareYer),
                       'updated_at': FieldValue.serverTimestamp(),
-                    });
+                    }, SetOptions(merge: true));
                     tx.set(hRef, {
                       'current_month_wan_mb': FieldValue.increment(chunkMb),
                       'total_settled_to_wallet_yer': FieldValue.increment(hostShareYer),
@@ -991,8 +977,7 @@ jobs:
               _fuelPumpTimer = Timer.periodic(const Duration(milliseconds: 250), (_) async {
                 if (!isVpnActive) return;
                 try {
-                  final num? rawDelta = await _vpnChannel.invokeMethod<num>('pollRealtimeDeltaBytes');
-                  final int deltaBytes = rawDelta?.toInt() ?? 0;
+                  final int deltaBytes = await _vpnChannel.invokeMethod<int>('pollRealtimeDeltaBytes') ?? 0;
                   _ticksCounter++;
 
                   if (deltaBytes > 0) {
