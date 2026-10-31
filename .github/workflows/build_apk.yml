@@ -57,7 +57,6 @@ jobs:
 
           subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
 
-          # حذف مجلد الاختبار الافتراضي الذي يبحث عن MyApp
           if os.path.exists("test"):
               shutil.rmtree("test")
 
@@ -125,15 +124,17 @@ jobs:
                       return START_NOT_STICKY
                   }
                   if (action == "UPDATE_POLICY") {
-                      val eco = intent.getBooleanExtra("ecoMode", false)
-                      val locked = intent.getBooleanExtra("parentalLocked", false)
-                      val blockedList = intent.getStringArrayListExtra("blockedDomains") ?: arrayListOf()
-                      ecoModeEnabled.set(eco)
-                      parentalLocked.set(locked)
-                      blockedDomains.clear()
-                      blockedDomains.addAll(blockedList)
-                      if (locked) {
-                          stopVpnTunnel()
+                      intent?.let { safeIntent ->
+                          val eco = safeIntent.getBooleanExtra("ecoMode", false)
+                          val locked = safeIntent.getBooleanExtra("parentalLocked", false)
+                          val blockedList = safeIntent.getStringArrayListExtra("blockedDomains") ?: arrayListOf<String>()
+                          ecoModeEnabled.set(eco)
+                          parentalLocked.set(locked)
+                          blockedDomains.clear()
+                          blockedDomains.addAll(blockedList)
+                          if (locked) {
+                              stopVpnTunnel()
+                          }
                       }
                       return START_STICKY
                   }
@@ -524,7 +525,7 @@ jobs:
               } catch (_) {}
             }
 
-            Future> getLocalContacts() async {
+            Future<Map<String, String>> getLocalContacts() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
                 final Map<String, dynamic> decoded = jsonDecode(raw);
@@ -566,7 +567,7 @@ jobs:
               } catch (_) {}
             }
 
-            Future> verifyManualHostActivation(String hostId, {bool requirePhysicalRouter = false}) async {
+            Future<Map<String, dynamic>> verifyManualHostActivation(String hostId, {bool requirePhysicalRouter = false}) async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
               if (!hostSnap.exists) {
@@ -1050,7 +1051,7 @@ jobs:
               }
             }
 
-            Future> executeUnifiedTransfer({
+            Future<Map<String, dynamic>> executeUnifiedTransfer({
               required String receiverId,
               required int amountYer,
               required String transferMode,
@@ -1177,7 +1178,7 @@ jobs:
                   'timestamp': FieldValue.serverTimestamp(),
                 });
 
-                return {
+                return <String, dynamic>{
                   'net_deducted': netCashDeductedFromSender,
                   'sender_discount': senderDiscountEarned,
                   'receiver_bonus': receiverBonusAdded,
@@ -2318,7 +2319,6 @@ jobs:
             void _showMyQrSheet(String myId) {
               showModalBottomSheet(
                 context: context,
-                backgroundColor: const Color(0xFF1E293B),
                 builder: (ctx) => Padding(
                   padding: const EdgeInsets.all(24),
                   child: Column(
@@ -2353,7 +2353,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release --no-shrink
+        run: flutter build apk --release
 
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
