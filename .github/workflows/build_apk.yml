@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Commercial LVNO V4 (Auto 60s Heartbeat & MikroTik Gate)
+      - name: Generate LVNO V5 (Fuel-Pump Meter + 100MB/80MB Quota + Host Wallet Link)
         shell: python
         run: |
           import os, shutil, json, subprocess, re
@@ -65,9 +65,9 @@ jobs:
               open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 
           pubspec_txt = '''name: smartclient
-          description: Unified Commercial Network App
+          description: Unified Commercial Network App V5
           publish_to: 'none'
-          version: 4.0.0+9
+          version: 5.0.0+10
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -98,8 +98,6 @@ jobs:
           import java.io.FileInputStream
           import java.nio.ByteBuffer
           import java.nio.charset.StandardCharsets
-          import java.util.Collections
-          import java.util.LinkedHashMap
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
           import java.util.concurrent.atomic.AtomicLong
@@ -109,18 +107,8 @@ jobs:
                   val isRunning = AtomicBoolean(false)
                   val ecoModeEnabled = AtomicBoolean(false)
                   val parentalLocked = AtomicBoolean(false)
-                  val wanBytesCount = AtomicLong(0)
-                  val cacheBytesCount = AtomicLong(0)
-                  var lastTotalDeviceBytes: Long = 0L
-
-                  val localDnsRamCache: MutableMap<String, String> = Collections.synchronizedMap(
-                      object : LinkedHashMap<String, String>(5000, 0.75f, true) {
-                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-                              return size > 10000
-                          }
-                      }
-                  )
-
+                  val tunnelInspectorBytes = AtomicLong(0)
+                  var lastOsTotalBytes: Long = 0L
                   val blockedDomains = ConcurrentHashMap.newKeySet<String>()
               }
 
@@ -158,7 +146,8 @@ jobs:
                   try {
                       val rx = TrafficStats.getTotalRxBytes()
                       val tx = TrafficStats.getTotalTxBytes()
-                      lastTotalDeviceBytes = if (rx > 0 && tx > 0) (rx + tx) else 0L
+                      lastOsTotalBytes = if (rx > 0 && tx > 0) (rx + tx) else 0L
+                      tunnelInspectorBytes.set(0L)
 
                       val mtuSize = if (ecoModeEnabled.get()) 1280 else 1500
                       val builder = Builder()
@@ -209,28 +198,17 @@ jobs:
                               }
                               val length = inputStream.read(packet.array())
                               if (length > 20) {
-                                  // إسقاط الحزمة فوراً إذا كانت ضمن قوائم الحظر المخصصة للطفل
                                   if (isPayloadBlocked(packet.array(), length)) {
                                       packet.clear()
                                       continue
                                   }
-
-                                  val b0 = packet.get(16).toInt() and 0xFF
-                                  val b1 = packet.get(17).toInt() and 0xFF
-                                  val b2 = packet.get(18).toInt() and 0xFF
-
-                                  if (b0 == 10 && b1 == 99 && b2 == 99) {
-                                      cacheBytesCount.addAndGet(length.toLong())
-                                  } else {
-                                      wanBytesCount.addAndGet(length.toLong())
-                                  }
-
+                                  tunnelInspectorBytes.addAndGet(length.toLong())
                                   if (ecoModeEnabled.get() && length > 1100) {
                                       Thread.sleep(6)
                                   }
                                   packet.clear()
                               } else {
-                                  Thread.sleep(12)
+                                  Thread.sleep(10)
                               }
                           } catch (e: Exception) {
                               break
@@ -267,6 +245,9 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.net.InetAddress
+          import java.net.InetSocketAddress
+          import java.net.Socket
           import java.util.ArrayList
 
           class MainActivity: FlutterActivity() {
@@ -288,13 +269,46 @@ jobs:
                               result.success(androidId)
                           }
                           "getLocalContactsJson" -> {
-                              val jsonStr = prefs.getString("contacts_json", "{}") ?: "{}"
-                              result.success(jsonStr)
+                              result.success(prefs.getString("contacts_json", "{}") ?: "{}")
                           }
                           "saveLocalContactsJson" -> {
                               val jsonStr = call.argument<String>("json") ?: "{}"
                               prefs.edit().putString("contacts_json", jsonStr).apply()
                               result.success(true)
+                          }
+                          "getQuotaStateJson" -> {
+                              result.success(prefs.getString("quota_state_json", "{}") ?: "{}")
+                          }
+                          "saveQuotaStateJson" -> {
+                              val jsonStr = call.argument<String>("json") ?: "{}"
+                              prefs.edit().putString("quota_state_json", jsonStr).apply()
+                              result.success(true)
+                          }
+                          "verifyMikroTikHandshake" -> {
+                              val gatewayIp = call.argument<String>("gatewayIp") ?: "10.99.99.1"
+                              val expectedHostDomain = call.argument<String>("hostDomain") ?: "gateway.lvno.local"
+                              Thread {
+                                  var verified = false
+                                  try {
+                                      // 1. فحص اتصال TCP مباشر ببوابة الميكروتك المفعلة (10.99.99.1)
+                                      val sock = Socket()
+                                      sock.connect(InetSocketAddress(gatewayIp, 53), 1200)
+                                      sock.close()
+                                      // 2. فحص استجابة اسم البوابة المحلي من الميكروتك
+                                      val resolved = InetAddress.getByName(expectedHostDomain).hostAddress
+                                      verified = (resolved == gatewayIp)
+                                  } catch (_: Exception) {
+                                      try {
+                                          val s2 = Socket()
+                                          s2.connect(InetSocketAddress(gatewayIp, 80), 1200)
+                                          s2.close()
+                                          verified = true
+                                      } catch (_: Exception) {
+                                          verified = false
+                                      }
+                                  }
+                                  runOnUiThread { result.success(verified) }
+                              }.start()
                           }
                           "scanQrNative" -> {
                               try {
@@ -309,29 +323,25 @@ jobs:
                           "isVpnRunning" -> {
                               result.success(VpnTunnelService.isRunning.get())
                           }
-                          "getAndResetTrafficStats" -> {
-                              var wanDelta = VpnTunnelService.wanBytesCount.getAndSet(0L)
-                              val cacheDelta = VpnTunnelService.cacheBytesCount.getAndSet(0L)
-
-                              // قياس إجمالي استهلاك واجهة الشبكة الحقيقي أثناء عمل النفق لضمان دقة المحاسبة 100%
+                          "pollRealtimeDeltaBytes" -> {
+                              if (!VpnTunnelService.isRunning.get()) {
+                                  result.success(0L)
+                                  return@setMethodCallHandler
+                              }
+                              var delta = VpnTunnelService.tunnelInspectorBytes.getAndSet(0L)
                               val rx = TrafficStats.getTotalRxBytes()
                               val tx = TrafficStats.getTotalTxBytes()
                               if (rx > 0 && tx > 0) {
                                   val nowTotal = rx + tx
-                                  if (VpnTunnelService.lastTotalDeviceBytes > 0 && nowTotal > VpnTunnelService.lastTotalDeviceBytes) {
-                                      val totalDelta = nowTotal - VpnTunnelService.lastTotalDeviceBytes
-                                      if (totalDelta > (wanDelta + cacheDelta)) {
-                                          wanDelta = totalDelta - cacheDelta
+                                  if (VpnTunnelService.lastOsTotalBytes > 0 && nowTotal > VpnTunnelService.lastOsTotalBytes) {
+                                      val osDelta = nowTotal - VpnTunnelService.lastOsTotalBytes
+                                      if (osDelta > delta) {
+                                          delta = osDelta
                                       }
                                   }
-                                  VpnTunnelService.lastTotalDeviceBytes = nowTotal
+                                  VpnTunnelService.lastOsTotalBytes = nowTotal
                               }
-
-                              val stats = mapOf(
-                                  "wanBytes" to wanDelta,
-                                  "cacheBytes" to cacheDelta
-                              )
-                              result.success(stats)
+                              result.success(delta)
                           }
                           "startVpn" -> {
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
@@ -440,20 +450,34 @@ jobs:
           </manifest>'''
           write_clean("android/app/src/main/AndroidManifest.xml", manifest_xml)
 
+          # المحرك الجديد V5: عداد مضخة البنزين بالفاصلة العشرية + دفعات 100MB/80MB + ربط محفظة الشبكة
           core_code = '''import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
+          import 'package:flutter/foundation.dart';
           import 'package:flutter/services.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
 
-          class SmartClientEngine {
+          class SmartClientEngine extends ChangeNotifier {
             String walletId = "";
             String currentHostId;
             bool isVpnActive = false;
             bool ecoMode = false;
-            Timer? _heartbeatTimer;
-            int _pendingUnbilledWanBytes = 0;
-            int _pendingUnbilledCacheBytes = 0;
+            bool isPurchasingChunk = false;
+
+            // متغيرات عداد مضخة البنزين والخزان المحلي (100MB / 80MB)
+            int activeChunkTotalBytes = 0;       // إجمالي الدفعة الحالية بالبايت (مثلاً 100 MB)
+            int activeChunkConsumedBytes = 0;    // المستهلك من الدفعة الحالية بالبايت
+            double currentChunkPriceYer = 25.0;  // سعر الدفعة الواحدة بالريال
+            double currentGbPriceYer = 250.0;    // سعر الجيجا الحالي من السيرفر
+            int serverChunkSizeMb = 100;         // حجم الدفعة من السيرفر (الافتراضي 100 ميجا)
+            int serverRefillTriggerMb = 80;      // حد إعادة الشراء التلقائي (عند استهلاك 80 ميجا)
+            int serverCreditBalanceYer = 0;      // رصيد المحفظة المحفوظ في السيرفر بعد خصم الدفعة الجارية
+            double liveSpeedKbps = 0.0;          // سرعة السحب اللحظية
+
+            Timer? _fuelPumpTimer;
+            Timer? _mikrotikKeepAliveTimer;
+            int _ticksCounter = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -465,6 +489,36 @@ jobs:
 
             SmartClientEngine({required this.currentHostId});
 
+            // حساب المتبقي في الخزان المحلي بالميجابايت (بالفاصلة العشرية)
+            double get remainingChunkMb {
+              final rem = activeChunkTotalBytes - activeChunkConsumedBytes;
+              if (rem <= 0) return 0.0;
+              return rem / (1024.0 * 1024.0);
+            }
+
+            // حساب المستهلك من الدفعة الحالية بالميجابايت
+            double get consumedChunkMb {
+              return activeChunkConsumedBytes / (1024.0 * 1024.0);
+            }
+
+            // عداد مضخة البنزين: الرصيد الإجمالي اللحظي بالريال والفاصلة العشرية (يتحرك مع كل كيلوبايت)
+            double get fuelPumpRealtimeBalanceYer {
+              if (activeChunkTotalBytes <= 0) {
+                return serverCreditBalanceYer.toDouble();
+              }
+              final double remRatio = (activeChunkTotalBytes - activeChunkConsumedBytes) / activeChunkTotalBytes;
+              final double clampedRatio = remRatio.clamp(0.0, 1.0);
+              final double remainingChunkValueYer = clampedRatio * currentChunkPriceYer;
+              return serverCreditBalanceYer.toDouble() + remainingChunkValueYer;
+            }
+
+            // تكلفة ما تم صرفه من الدفعة الحالية بالفاصلة العشرية (مثل عداد البنزين التصاعدي)
+            double get currentSessionConsumedYer {
+              if (activeChunkTotalBytes <= 0) return 0.0;
+              final double usedRatio = (activeChunkConsumedBytes / activeChunkTotalBytes).clamp(0.0, 1.0);
+              return usedRatio * currentChunkPriceYer;
+            }
+
             Future<String> getDeviceHardwareId() async {
               try {
                 final id = await _vpnChannel.invokeMethod<String>('getDeviceHardwareId');
@@ -474,7 +528,29 @@ jobs:
               }
             }
 
-            Future<Map<String, String>> getLocalContacts() async {
+            Future<void> loadSavedQuotaState() async {
+              try {
+                final raw = await _vpnChannel.invokeMethod<String>('getQuotaStateJson') ?? '{}';
+                final Map<String, dynamic> data = jsonDecode(raw);
+                activeChunkTotalBytes = ((data['totalBytes'] ?? 0) as num).toInt();
+                activeChunkConsumedBytes = ((data['consumedBytes'] ?? 0) as num).toInt();
+                currentChunkPriceYer = ((data['chunkPriceYer'] ?? 25.0) as num).toDouble();
+                notifyListeners();
+              } catch (_) {}
+            }
+
+            Future<void> persistQuotaState() async {
+              try {
+                final payload = jsonEncode({
+                  'totalBytes': activeChunkTotalBytes,
+                  'consumedBytes': activeChunkConsumedBytes,
+                  'chunkPriceYer': currentChunkPriceYer,
+                });
+                await _vpnChannel.invokeMethod('saveQuotaStateJson', {'json': payload});
+              } catch (_) {}
+            }
+
+            Future> getLocalContacts() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
                 final Map<String, dynamic> decoded = jsonDecode(raw);
@@ -504,38 +580,58 @@ jobs:
               }
             }
 
-            // طرق بوابة راوتر الميكروتك (Port-Knocking) لفتح أو قفل الإنترنت الفعلي للجهاز
             Future<void> _knockMikroTikGateway({required bool unlock}) async {
               final int targetPort = unlock ? 9981 : 9982;
               try {
                 final socket = await Socket.connect(
                   '10.99.99.1',
                   targetPort,
-                  timeout: const Duration(milliseconds: 900),
+                  timeout: const Duration(milliseconds: 800),
                 );
                 socket.destroy();
-              } catch (_) {
-                // حتى لو أغلقت البوابة المنفذ، فإن حزمة SYN قد سجلت الـ IP في قائمة LVNO_ACTIVE_IPS بنجاح
-              }
+              } catch (_) {}
             }
 
-            Future<bool> verifyActiveHostNetwork(String hostId) async {
+            // فحص التفعيل اليدوي المزدوج: (مفعلة في السيرفر + متصلة فعلياً ببوابة الميكروتك المعتمدة)
+            Future> verifyManualHostActivation(String hostId, {bool requirePhysicalRouter = false}) async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
-              if (!hostSnap.exists) return false;
-              final status = (hostSnap.data()?['status'] ?? 'active').toString();
+              if (!hostSnap.exists) {
+                return {'ok': false, 'reason': 'هذه الشبكة غير مسجلة في السيرفر'};
+              }
+              final data = hostSnap.data()!;
+              final status = (data['status'] ?? 'inactive').toString();
+              final bool manualApproved = (data['manual_admin_approved'] ?? true) == true;
+              final String secretCode = (data['activation_secret'] ?? '').toString().trim();
+              final String gatewayIp = (data['gateway_ip'] ?? '10.99.99.1').toString().trim();
+
+              if (status != 'active' || !manualApproved || secretCode.isEmpty) {
+                return {'ok': false, 'reason': 'الشبكة غير مفعلة يدوياً من إدارة النظام'};
+              }
+
+              if (requirePhysicalRouter && (data['enforce_physical_router_check'] ?? false) == true) {
+                final bool routerReachable = await _vpnChannel.invokeMethod<bool>('verifyMikroTikHandshake', {
+                  'gatewayIp': gatewayIp,
+                  'hostDomain': 'gateway.lvno.local',
+                }) ?? false;
+                if (!routerReachable) {
+                  return {'ok': false, 'reason': 'أنت غير متصل بواي فاي راوتر الميكروتك المفعل ($gatewayIp)'};
+                }
+              }
+
               currentHostId = hostId;
-              return status == 'active';
+              return {'ok': true, 'data': data};
             }
 
             Future<String> registerOrRecoverDeviceWallet() async {
               final db = FirebaseFirestore.instance;
               final deviceId = await getDeviceHardwareId();
               await _ensureDefaultSystemSettings(db);
+              await loadSavedQuotaState();
 
-              final activeNet = await verifyActiveHostNetwork(currentHostId);
-              if (!activeNet) {
-                throw Exception("يتطلب التفعيل الاتصال بنقطة معتمدة ومفعلة");
+              final check = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: false);
+              if (check['ok'] != true) {
+                throw Exception(check['reason'] ?? "الشبكة غير مفعلة");
               }
 
               final devRef = db.collection('device_registry').doc(deviceId);
@@ -607,20 +703,26 @@ jobs:
               if (!(await cfgRef.get()).exists) {
                 await cfgRef.set({
                   'gb_price_consumer_yer': 250,
-                  'gb_payout_host_yer': 195,
-                  'credit_sender_discount_pct': 10.0,
-                  'credit_receiver_bonus_pct': 5.0,
+                  'quota_chunk_mb': 100,             // حجم الدفعة الواحدة من السيرفر (100 ميجا)
+                  'quota_refill_trigger_mb': 80,     // يشتري دفعة جديدة عند استهلاك 80 ميجا (الباقي 20 ميجا)
+                  'system_profit_pct': 10.0,         // نسبة ربح المنظومة من الدفعة (قابلة للتعديل 7، 8، 10%)
+                  'credit_sender_discount_pct': 7.0, // نسبة ربح المحول عند شحن رصيد
+                  'credit_receiver_bonus_pct': 3.0,  // نسبة البونص الإضافي للمحفظة عند شحن رصيد
                   'general_tier_max_balance_yer': 10000,
                   'general_tier_daily_limit_yer': 5000,
-                  'family_filter_enforced': true,
-                  'ai_smart_manager_ready': true,
                 });
               }
               final hostRef = db.collection('hosts').doc(currentHostId);
               if (!(await hostRef.get()).exists) {
                 await hostRef.set({
                   'host_id': currentHostId,
-                  'network_name': 'النقطة الرئيسية المعتمدة',
+                  'network_name': 'شبكة الهدى المفعلة',
+                  'owner_wallet_id': '1001',         // ربط الشبكة بمحفظة صاحبها
+                  'auto_transfer_to_wallet': false,  // تحويل تلقائي أو سحب بطلب من المحفظة
+                  'activation_secret': 'MK-LVNO-2026',
+                  'gateway_ip': '10.99.99.1',
+                  'manual_admin_approved': true,
+                  'enforce_physical_router_check': false,
                   'status': 'active',
                   'current_month_wan_mb': 0,
                   'amount_due_yer': 0,
@@ -628,8 +730,188 @@ jobs:
               }
             }
 
-            Future<void> syncDevicePolicyFromWalletDoc(Map<String, dynamic> wData) async {
+            // شراء دفعة ميجاهات (100 MB) من السيرفر وتوزيع النسب لصاحب الشبكة والمنظومة ذرياً
+            Future<bool> purchaseQuotaChunkFromServer() async {
+              if (isPurchasingChunk) return false;
+              isPurchasingChunk = true;
+              notifyListeners();
+
+              try {
+                final db = FirebaseFirestore.instance;
+                final wRef = db.collection('wallets').doc(walletId);
+                final hRef = db.collection('hosts').doc(currentHostId);
+                final cfgRef = db.collection('settings').doc('global_config');
+
+                final res = await db.runTransaction((tx) async {
+                  final wSnap = await tx.get(wRef);
+                  final hSnap = await tx.get(hRef);
+                  final cfgSnap = await tx.get(cfgRef);
+
+                  if (!wSnap.exists) throw Exception("الحساب غير موجود");
+                  if (!hSnap.exists) throw Exception("الشبكة غير مسجلة");
+
+                  final wData = wSnap.data()!;
+                  final hData = hSnap.data()!;
+                  final cfg = cfgSnap.data() ?? {};
+
+                  if ((hData['status'] ?? 'inactive') != 'active' || (hData['manual_admin_approved'] ?? true) != true) {
+                    throw Exception("الشبكة غير مفعلة يدوياً من النظام");
+                  }
+
+                  final double gbPrice = ((cfg['gb_price_consumer_yer'] ?? 250) as num).toDouble();
+                  final int chunkMb = ((cfg['quota_chunk_mb'] ?? 100) as num).toInt();
+                  final int triggerMb = ((cfg['quota_refill_trigger_mb'] ?? 80) as num).toInt();
+                  final double sysProfitPct = ((cfg['system_profit_pct'] ?? 10.0) as num).toDouble();
+
+                  // حساب سعر الدفعة (مثلاً 100 ميجا من أصل 1000 ميجا = 10% من سعر الجيجا)
+                  final double rawChunkPrice = (chunkMb / 1000.0) * gbPrice;
+                  final int chunkCostYer = rawChunkPrice.ceil() < 1 ? 1 : rawChunkPrice.round();
+
+                  final int currentCredit = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
+                  if (currentCredit < chunkCostYer) {
+                    throw Exception("رصيد الاستخدام ($currentCredit ريال) لا يكفي لشراء دفعة جديدة ($chunkCostYer ريال / $chunkMb ميجا)");
+                  }
+
+                  // توزيع قيمة الدفعة بين صاحب الشبكة ونسبة ربح المنظومة (7% - 8% - 10%)
+                  final int sysProfitYer = (chunkCostYer * (sysProfitPct / 100.0)).round();
+                  final int hostShareYer = chunkCostYer - sysProfitYer;
+
+                  final String ownerWalletId = (hData['owner_wallet_id'] ?? '').toString().trim();
+                  final bool autoSettle = (hData['auto_transfer_to_wallet'] ?? false) == true;
+
+                  DocumentSnapshot? ownerWalletSnap;
+                  DocumentReference? ownerWalletRef;
+                  if (autoSettle && ownerWalletId.isNotEmpty) {
+                    ownerWalletRef = db.collection('wallets').doc(ownerWalletId);
+                    if (ownerWalletId == walletId) {
+                      ownerWalletSnap = wSnap;
+                    } else {
+                      ownerWalletSnap = await tx.get(ownerWalletRef);
+                    }
+                  }
+
+                  // 1. خصم الدفعة من رصيد استخدام المشترك
+                  tx.update(wRef, {
+                    'credit_balance_yer': currentCredit - chunkCostYer,
+                    'updated_at': FieldValue.serverTimestamp(),
+                  });
+
+                  // 2. إيداع مستحقات الشبكة (إما تلقائياً لمحفظة المالك أو في رصيد الشبكة القابل للسحب)
+                  if (autoSettle && ownerWalletSnap != null && ownerWalletSnap.exists && ownerWalletRef != null) {
+                    tx.update(ownerWalletRef, {
+                      'cash_balance_yer': FieldValue.increment(hostShareYer),
+                      'updated_at': FieldValue.serverTimestamp(),
+                    });
+                    tx.update(hRef, {
+                      'current_month_wan_mb': FieldValue.increment(chunkMb),
+                      'total_settled_to_wallet_yer': FieldValue.increment(hostShareYer),
+                      'last_heartbeat': FieldValue.serverTimestamp(),
+                    });
+                  } else {
+                    tx.update(hRef, {
+                      'current_month_wan_mb': FieldValue.increment(chunkMb),
+                      'amount_due_yer': FieldValue.increment(hostShareYer),
+                      'last_heartbeat': FieldValue.serverTimestamp(),
+                    });
+                  }
+
+                  // 3. تسجيل الدفعة في خزنة المقاصة
+                  final vaultRef = db.collection('admin_secret_vault').doc(currentHostId);
+                  tx.set(vaultRef, {
+                    'host_id': currentHostId,
+                    'wan_mb_visible_to_host': FieldValue.increment(chunkMb),
+                    'total_charged_to_consumers_yer': FieldValue.increment(chunkCostYer),
+                    'host_payout_yer': FieldValue.increment(hostShareYer),
+                    'net_admin_profit_yer': FieldValue.increment(sysProfitYer),
+                    'updated_at': FieldValue.serverTimestamp(),
+                  }, SetOptions(merge: true));
+
+                  return {
+                    'chunkMb': chunkMb,
+                    'triggerMb': triggerMb,
+                    'chunkCostYer': chunkCostYer,
+                    'gbPrice': gbPrice,
+                    'newServerCredit': currentCredit - chunkCostYer,
+                  };
+                });
+
+                final int addedBytes = ((res['chunkMb'] as int) * 1024 * 1024);
+                final int prevRemainingBytes = (activeChunkTotalBytes - activeChunkConsumedBytes) > 0
+                    ? (activeChunkTotalBytes - activeChunkConsumedBytes)
+                    : 0;
+
+                // دمج المتبقي من الدفعة السابقة (إن وجد مثل الـ 20 ميجا) مع الدفعة الجديدة (100 ميجا)
+                activeChunkTotalBytes = prevRemainingBytes + addedBytes;
+                activeChunkConsumedBytes = 0;
+
+                serverChunkSizeMb = res['chunkMb'] as int;
+                serverRefillTriggerMb = res['triggerMb'] as int;
+                currentGbPriceYer = res['gbPrice'] as double;
+                currentChunkPriceYer = (activeChunkTotalBytes / (1024.0 * 1024.0 * 1000.0)) * currentGbPriceYer;
+                serverCreditBalanceYer = res['newServerCredit'] as int;
+
+                await persistQuotaState();
+                isPurchasingChunk = false;
+                notifyListeners();
+                return true;
+              } catch (e) {
+                isPurchasingChunk = false;
+                notifyListeners();
+                rethrow;
+              }
+            }
+
+            // سحب مستحقات الشبكة يدوياً بطلب من محفظة صاحب الشبكة أو تفعيل التحويل التلقائي
+            Future<int> withdrawHostEarningsToMyWallet(String hostId) async {
+              final db = FirebaseFirestore.instance;
+              final hRef = db.collection('hosts').doc(hostId);
+              final wRef = db.collection('wallets').doc(walletId);
+
+              return await db.runTransaction((tx) async {
+                final hSnap = await tx.get(hRef);
+                final wSnap = await tx.get(wRef);
+                if (!hSnap.exists) throw Exception("الشبكة غير موجودة");
+                if (!wSnap.exists) throw Exception("المحفظة غير موجودة");
+
+                final hData = hSnap.data()!;
+                final String ownerId = (hData['owner_wallet_id'] ?? '').toString().trim();
+                if (ownerId != walletId) {
+                  throw Exception("هذه الشبكة غير مربوطة برقم محفظتك (#$walletId)");
+                }
+
+                final int dueYer = ((hData['amount_due_yer'] ?? 0) as num).toInt();
+                if (dueYer <= 0) {
+                  throw Exception("لا توجد مستحقات معلقة للسحب حالياً");
+                }
+
+                tx.update(hRef, {
+                  'amount_due_yer': 0,
+                  'total_settled_to_wallet_yer': FieldValue.increment(dueYer),
+                  'updated_at': FieldValue.serverTimestamp(),
+                });
+
+                tx.update(wRef, {
+                  'cash_balance_yer': FieldValue.increment(dueYer),
+                  'updated_at': FieldValue.serverTimestamp(),
+                });
+
+                return dueYer;
+              });
+            }
+
+            Future<void> toggleHostAutoTransfer(String hostId, bool autoEnabled) async {
+              await FirebaseFirestore.instance.collection('hosts').doc(hostId).update({
+                'auto_transfer_to_wallet': autoEnabled,
+              });
+            }
+
+            Future<void> syncDevicePolicyFromWalletDoc(Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
               ecoMode = (wData['eco_mode'] ?? false) == true;
+              serverCreditBalanceYer = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
+              currentGbPriceYer = ((cfgData['gb_price_consumer_yer'] ?? 250) as num).toDouble();
+              serverChunkSizeMb = ((cfgData['quota_chunk_mb'] ?? 100) as num).toInt();
+              serverRefillTriggerMb = ((cfgData['quota_refill_trigger_mb'] ?? 80) as num).toInt();
+
               final bool locked = (wData['parental_locked'] ?? false) == true;
               final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
               final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt();
@@ -659,142 +941,139 @@ jobs:
               } catch (_) {}
             }
 
-            Future<bool> startSmartConnection(Map<String, dynamic> wData) async {
-              final int creditBal = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
-              if (creditBal <= 0) {
-                throw Exception("يرجى تغذية رصيد الاستخدام أولاً لتشغيل النفق");
-              }
+            Future<bool> startSmartConnection(Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
               if ((wData['parental_locked'] ?? false) == true) {
-                throw Exception("تم إيقاف الاستخدام مؤقتاً من قِبل المشرف العائلي");
+                throw Exception("تم إيقاف الاستخدام مؤقتاً من المشرف العائلي");
               }
               final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
               final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt();
               if (limitMins > 0 && usedMins >= limitMins) {
                 throw Exception("انتهى وقت الاستخدام اليومي المخصص لهذا الجهاز");
               }
-              final okHost = await verifyActiveHostNetwork(currentHostId);
-              if (!okHost) {
-                throw Exception("لا يمكن تشغيل النفق إلا على نقطة مفعلة");
+
+              // 1. فحص التفعيل اليدوي للشبكة بين السيرفر والميكروتك
+              final hostCheck = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
+              if (hostCheck['ok'] != true) {
+                throw Exception(hostCheck['reason'] ?? "لا يمكن تشغيل النفق إلا على شبكة مفعلة");
               }
-              await syncDevicePolicyFromWalletDoc(wData);
+
+              await syncDevicePolicyFromWalletDoc(wData, cfgData);
+
+              // 2. إذا كان الخزان المحلي فارغاً، نشتري أول دفعة (100 ميجا) فوراً من السيرفر قبل فتح النفق
+              if ((activeChunkTotalBytes - activeChunkConsumedBytes) <= 512 * 1024) {
+                await purchaseQuotaChunkFromServer();
+              }
+
               final ok = await _vpnChannel.invokeMethod<bool>('startVpn', {
                 'ecoMode': ecoMode,
               });
               isVpnActive = ok ?? false;
               if (isVpnActive) {
                 await _knockMikroTikGateway(unlock: true);
-                _startAutoHeartbeatTimer();
+                _startRealtimeFuelPumpLoop();
               }
+              notifyListeners();
               return isVpnActive;
             }
 
             Future<void> stopSmartConnection() async {
-              _heartbeatTimer?.cancel();
-              _heartbeatTimer = null;
+              _fuelPumpTimer?.cancel();
+              _fuelPumpTimer = null;
+              _mikrotikKeepAliveTimer?.cancel();
+              _mikrotikKeepAliveTimer = null;
+              liveSpeedKbps = 0.0;
+              await persistQuotaState();
               await _knockMikroTikGateway(unlock: false);
               try {
                 await _vpnChannel.invokeMethod('stopVpn');
               } catch (_) {}
               isVpnActive = false;
+              notifyListeners();
             }
 
-            // النبضة التلقائية كل 60 ثانية: محاسبة البايتات + تحديث وقت الطفل + تجديد فتح بوابة الميكروتك
-            void _startAutoHeartbeatTimer() {
-              _heartbeatTimer?.cancel();
-              _heartbeatTimer = Timer.periodic(const Duration(seconds: 60), (_) async {
+            // حلقة عداد البنزين اللحظية (كل 250 ميللي ثانية): تحسب بالفاصلة وتشتري دفعة جديدة عند استهلاك 80 ميجا
+            void _startRealtimeFuelPumpLoop() {
+              _fuelPumpTimer?.cancel();
+              _mikrotikKeepAliveTimer?.cancel();
+              _ticksCounter = 0;
+
+              // تجديد إشارة فتح بوابة الميكروتك كل 45 ثانية طالما النفق نشط والخزان فيه رصيد
+              _mikrotikKeepAliveTimer = Timer.periodic(const Duration(seconds: 45), (_) async {
+                if (!isVpnActive) return;
+                final check = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
+                if (check['ok'] != true) {
+                  await stopSmartConnection();
+                  return;
+                }
+                await _knockMikroTikGateway(unlock: true);
+              });
+
+              _fuelPumpTimer = Timer.periodic(const Duration(milliseconds: 250), (_) async {
                 if (!isVpnActive) return;
                 try {
-                  final activeNet = await verifyActiveHostNetwork(currentHostId);
-                  if (!activeNet) {
-                    await stopSmartConnection();
-                    return;
-                  }
+                  final int deltaBytes = await _vpnChannel.invokeMethod<int>('pollRealtimeDeltaBytes') ?? 0;
+                  _ticksCounter++;
 
-                  final db = FirebaseFirestore.instance;
-                  final wRef = db.collection('wallets').doc(walletId);
-                  final wSnap = await wRef.get();
-                  if (!wSnap.exists) return;
-                  final wData = wSnap.data()!;
-
-                  final int creditBal = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
-                  final bool locked = (wData['parental_locked'] ?? false) == true;
-                  final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
-                  final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt() + 1;
-
-                  if (creditBal <= 0 || locked || (limitMins > 0 && usedMins > limitMins)) {
-                    await stopSmartConnection();
-                    return;
-                  }
-
-                  // سحب البايتات الحقيقية المستهلكة خلال الدقيقة الماضية من الكوتلن
-                  final stats = await _vpnChannel.invokeMapMethod<String, dynamic>('getAndResetTrafficStats');
-                  final int deltaWan = ((stats?['wanBytes'] ?? 0) as num).toInt();
-                  final int deltaCache = ((stats?['cacheBytes'] ?? 0) as num).toInt();
-
-                  _pendingUnbilledWanBytes += deltaWan;
-                  _pendingUnbilledCacheBytes += deltaCache;
-
-                  final cfgSnap = await db.collection('settings').doc('global_config').get();
-                  final cfg = cfgSnap.data() ?? {};
-                  final double gbPriceConsumer = ((cfg['gb_price_consumer_yer'] ?? 250) as num).toDouble();
-                  final double gbPayoutHost = ((cfg['gb_payout_host_yer'] ?? 195) as num).toDouble();
-
-                  final double wanMb = _pendingUnbilledWanBytes / (1024.0 * 1024.0);
-                  final double cacheMb = _pendingUnbilledCacheBytes / (1024.0 * 1024.0);
-                  final double totalGb = (wanMb + cacheMb) / 1024.0;
-                  final double wanGb = wanMb / 1024.0;
-
-                  final int consumerChargeYer = (totalGb * gbPriceConsumer).floor();
-                  final int hostCreditYer = (wanGb * gbPayoutHost).floor();
-                  final int adminProfitYer = consumerChargeYer - hostCreditYer;
-
-                  final batch = db.batch();
-
-                  if (consumerChargeYer >= 1) {
-                    // تصفير التراكم غير المفوتر بعد خصمه الفعلي بالريال
-                    _pendingUnbilledWanBytes = 0;
-                    _pendingUnbilledCacheBytes = 0;
-
-                    final int nextCredit = creditBal - consumerChargeYer;
-                    batch.update(wRef, {
-                      'credit_balance_yer': nextCredit < 0 ? 0 : nextCredit,
-                      'used_time_today_mins': FieldValue.increment(1),
-                      'updated_at': FieldValue.serverTimestamp(),
-                    });
-
-                    batch.set(db.collection('hosts').doc(currentHostId), {
-                      'current_month_wan_mb': FieldValue.increment(wanMb),
-                      'amount_due_yer': FieldValue.increment(hostCreditYer),
-                      'last_heartbeat': FieldValue.serverTimestamp(),
-                    }, SetOptions(merge: true));
-
-                    batch.set(db.collection('admin_secret_vault').doc(currentHostId), {
-                      'host_id': currentHostId,
-                      'wan_mb_visible_to_host': FieldValue.increment(wanMb),
-                      'local_cache_mb_secret': FieldValue.increment(cacheMb),
-                      'total_charged_to_consumers_yer': FieldValue.increment(consumerChargeYer),
-                      'host_payout_yer': FieldValue.increment(hostCreditYer),
-                      'net_admin_profit_yer': FieldValue.increment(adminProfitYer),
-                      'updated_at': FieldValue.serverTimestamp(),
-                    }, SetOptions(merge: true));
-
-                    await batch.commit();
-
-                    if (nextCredit <= 0) {
-                      await stopSmartConnection();
-                      return;
+                  if (deltaBytes > 0) {
+                    activeChunkConsumedBytes += deltaBytes;
+                    liveSpeedKbps = (deltaBytes * 4.0) / 1024.0;
+                    if (activeChunkConsumedBytes > activeChunkTotalBytes) {
+                      activeChunkConsumedBytes = activeChunkTotalBytes;
                     }
+                    notifyListeners();
                   } else {
-                    // تحديث دقيقة الاستخدام حتى لو كان الاستهلاك أقل من 1 ريال
-                    await wRef.update({
-                      'used_time_today_mins': FieldValue.increment(1),
-                    });
+                    liveSpeedKbps = 0.0;
                   }
 
-                  // تجديد صلاحية الـ IP في راوتر الميكروتك لمدة 90 ثانية قادمة
-                  await _knockMikroTikGateway(unlock: true);
+                  // حفظ حالة العداد محلياً كل ثانيتين (8 نبضات) لمنع ضياع أي بايت
+                  if (_ticksCounter % 8 == 0) {
+                    await persistQuotaState();
+                  }
+
+                  // حساب النقطة الحرجة لإعادة التعبئة (عندما يتبقى 20% فقط، أي استهلك 80 ميجا من أصل 100 ميجا)
+                  final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
+                  final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
+
+                  if (remainingBytes <= lowMarkBytes && !isPurchasingChunk && serverCreditBalanceYer > 0) {
+                    try {
+                      await purchaseQuotaChunkFromServer();
+                    } catch (_) {
+                      // إذا لم يكفِ الرصيد لشراء دفعة جديدة، يستمر المستخدم حتى ينفد آخر بايت في خزانه الحالي
+                    }
+                  }
+
+                  // إذا فرغ الخزان المحلي بالكامل (0.000 MB) ولم يتمكن من شراء دفعة جديدة، يغلق النفق فوراً
+                  if (remainingBytes <= 0 && !isPurchasingChunk) {
+                    await stopSmartConnection();
+                  }
                 } catch (_) {}
               });
+            }
+
+            // محاكاة سحب سريع (5 ميجابايت في النقرة) لاختبار حركة عداد البنزين بالفاصلة وشراء الدفعة عند 80 ميجا أمام العين
+            Future<void> simulateFastFuelConsumption(int megabytesToConsume) async {
+              if (!isVpnActive) {
+                throw Exception("شغّل النفق أولاً لترى عداد البنزين يتحرك بالفاصلة العشرية!");
+              }
+              final int stepBytes = (megabytesToConsume * 1024 * 1024) ~/ 10;
+              for (int i = 0; i < 10; i++) {
+                await Future.delayed(const Duration(milliseconds: 80));
+                activeChunkConsumedBytes += stepBytes;
+                if (activeChunkConsumedBytes > activeChunkTotalBytes) {
+                  activeChunkConsumedBytes = activeChunkTotalBytes;
+                }
+                notifyListeners();
+              }
+              await persistQuotaState();
+
+              final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
+              final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
+              if (remainingBytes <= lowMarkBytes && !isPurchasingChunk && serverCreditBalanceYer > 0) {
+                await purchaseQuotaChunkFromServer();
+              }
+              if (activeChunkTotalBytes - activeChunkConsumedBytes <= 0) {
+                await stopSmartConnection();
+              }
             }
 
             Future<void> toggleMyEcoMode(bool enabled) async {
@@ -826,7 +1105,7 @@ jobs:
               }
             }
 
-            Future<Map<String, dynamic>> executeUnifiedTransfer({
+            Future> executeUnifiedTransfer({
               required String receiverId,
               required int amountYer,
               required String transferMode,
@@ -856,8 +1135,8 @@ jobs:
                 final rData = receiverSnap.data()!;
                 final cfg = configSnap.data() ?? {};
 
-                final double senderDiscPct = ((cfg['credit_sender_discount_pct'] ?? 10.0) as num).toDouble();
-                final double receiverBonusPct = ((cfg['credit_receiver_bonus_pct'] ?? 5.0) as num).toDouble();
+                final double senderDiscPct = ((cfg['credit_sender_discount_pct'] ?? 7.0) as num).toDouble();
+                final double receiverBonusPct = ((cfg['credit_receiver_bonus_pct'] ?? 3.0) as num).toDouble();
                 final int genMaxBal = ((cfg['general_tier_max_balance_yer'] ?? 10000) as num).toInt();
                 final int genDailyLim = ((cfg['general_tier_daily_limit_yer'] ?? 5000) as num).toInt();
 
@@ -1100,7 +1379,7 @@ jobs:
                       children: [
                         CircularProgressIndicator(color: Color(0xFF10B981)),
                         SizedBox(height: 16),
-                        Text("جاري فتح الحساب...", style: TextStyle(fontSize: 15)),
+                        Text("جاري فتح الحساب والتحقق من الشبكة...", style: TextStyle(fontSize: 15)),
                       ],
                     ),
                   ),
@@ -1185,91 +1464,106 @@ jobs:
               final myId = widget.engine.walletId;
 
               return StreamBuilder<DocumentSnapshot>(
-                stream: db.collection('wallets').doc(myId).snapshots(),
-                builder: (context, walletSnap) {
-                  final w = (walletSnap.hasData && walletSnap.data!.exists)
-                      ? (walletSnap.data!.data() as Map<String, dynamic>)
+                stream: db.collection('settings').doc('global_config').snapshots(),
+                builder: (context, cfgSnap) {
+                  final cfg = (cfgSnap.hasData && cfgSnap.data!.exists)
+                      ? (cfgSnap.data!.data() as Map<String, dynamic>)
                       : <String, dynamic>{};
 
-                  widget.engine.syncDevicePolicyFromWalletDoc(w);
+                  return StreamBuilder<DocumentSnapshot>(
+                    stream: db.collection('wallets').doc(myId).snapshots(),
+                    builder: (context, walletSnap) {
+                      final w = (walletSnap.hasData && walletSnap.data!.exists)
+                          ? (walletSnap.data!.data() as Map<String, dynamic>)
+                          : <String, dynamic>{};
 
-                  final int cashBal = ((w['cash_balance_yer'] ?? 0) as num).toInt();
-                  final int creditBal = ((w['credit_balance_yer'] ?? 0) as num).toInt();
-                  final bool ecoMode = (w['eco_mode'] ?? false) == true;
-                  final bool kyc = (w['kyc_verified'] ?? false) == true;
-                  final String fullName = (w['full_name'] ?? '').toString().trim();
-                  final List<dynamic> linkedChildren = (w['linked_children'] as List<dynamic>?) ?? [];
+                      widget.engine.syncDevicePolicyFromWalletDoc(w, cfg);
 
-                  return Scaffold(
-                    appBar: AppBar(
-                      backgroundColor: const Color(0xFF0F172A),
-                      elevation: 0,
-                      title: Text(
-                        fullName.isNotEmpty ? "$fullName (#$myId)" : "حساب رقم #$myId",
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
-                      ),
-                      actions: [
-                        IconButton(
-                          icon: const Icon(Icons.qr_code_2, color: Color(0xFF10B981)),
-                          onPressed: () => _showMyQrSheet(myId),
-                        ),
-                      ],
-                    ),
-                    body: Column(
-                      children: [
-                        if (_feedback.isNotEmpty)
-                          Container(
-                            width: double.infinity,
-                            margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF064E3B),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Row(
-                              children: [
-                                Expanded(child: Text(_feedback, style: const TextStyle(fontSize: 13))),
+                      return ListenableBuilder(
+                        listenable: widget.engine,
+                        builder: (context, _) {
+                          final int cashBal = ((w['cash_balance_yer'] ?? 0) as num).toInt();
+                          final bool ecoMode = (w['eco_mode'] ?? false) == true;
+                          final bool kyc = (w['kyc_verified'] ?? false) == true;
+                          final String fullName = (w['full_name'] ?? '').toString().trim();
+                          final List<dynamic> linkedChildren = (w['linked_children'] as List<dynamic>?) ?? [];
+
+                          return Scaffold(
+                            appBar: AppBar(
+                              backgroundColor: const Color(0xFF0F172A),
+                              elevation: 0,
+                              title: Text(
+                                fullName.isNotEmpty ? "$fullName (#$myId)" : "حساب رقم #$myId",
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+                              ),
+                              actions: [
                                 IconButton(
-                                  icon: const Icon(Icons.close, size: 18),
-                                  onPressed: () => setState(() => _feedback = ""),
+                                  icon: const Icon(Icons.qr_code_2, color: Color(0xFF10B981)),
+                                  onPressed: () => _showMyQrSheet(myId),
                                 ),
                               ],
                             ),
-                          ),
-                        Expanded(
-                          child: IndexedStack(
-                            index: _currentTab,
-                            children: [
-                              _buildBalanceAndTransferTab(myId, cashBal, creditBal, kyc),
-                              _buildTunnelAndEcoTab(w, creditBal, ecoMode),
-                              _buildParentalControlTab(myId, linkedChildren),
-                              _buildContactsAndManagementTab(myId),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    bottomNavigationBar: NavigationBar(
-                      backgroundColor: const Color(0xFF0F172A),
-                      selectedIndex: _currentTab,
-                      onDestinationSelected: (idx) => setState(() => _currentTab = idx),
-                      destinations: const [
-                        NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'الرصيد'),
-                        NavigationDestination(icon: Icon(Icons.shield_outlined), selectedIcon: Icon(Icons.shield), label: 'النفق'),
-                        NavigationDestination(icon: Icon(Icons.family_restroom_outlined), selectedIcon: Icon(Icons.family_restroom), label: 'التحكم'),
-                        NavigationDestination(icon: Icon(Icons.manage_accounts_outlined), selectedIcon: Icon(Icons.manage_accounts), label: 'الإدارة'),
-                      ],
-                    ),
+                            body: Column(
+                              children: [
+                                if (_feedback.isNotEmpty)
+                                  Container(
+                                    width: double.infinity,
+                                    margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF064E3B),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Expanded(child: Text(_feedback, style: const TextStyle(fontSize: 13))),
+                                        IconButton(
+                                          icon: const Icon(Icons.close, size: 18),
+                                          onPressed: () => setState(() => _feedback = ""),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                Expanded(
+                                  child: IndexedStack(
+                                    index: _currentTab,
+                                    children: [
+                                      _buildBalanceAndTransferTab(myId, cashBal, kyc),
+                                      _buildFuelPumpTunnelTab(w, cfg, ecoMode),
+                                      _buildParentalControlTab(myId, linkedChildren),
+                                      _buildContactsAndHostWalletTab(myId),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            bottomNavigationBar: NavigationBar(
+                              backgroundColor: const Color(0xFF0F172A),
+                              selectedIndex: _currentTab,
+                              onDestinationSelected: (idx) => setState(() => _currentTab = idx),
+                              destinations: const [
+                                NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'الرصيد'),
+                                NavigationDestination(icon: Icon(Icons.local_gas_station_outlined), selectedIcon: Icon(Icons.local_gas_station), label: 'النفق والعداد'),
+                                NavigationDestination(icon: Icon(Icons.family_restroom_outlined), selectedIcon: Icon(Icons.family_restroom), label: 'التحكم'),
+                                NavigationDestination(icon: Icon(Icons.manage_accounts_outlined), selectedIcon: Icon(Icons.manage_accounts), label: 'الإدارة'),
+                              ],
+                            ),
+                          );
+                        },
+                      );
+                    },
                   );
                 },
               );
             }
 
-            Widget _buildBalanceAndTransferTab(String myId, int cashBal, int creditBal, bool kyc) {
+            Widget _buildBalanceAndTransferTab(String myId, int cashBal, bool kyc) {
               final filteredContacts = _localContacts.entries.where((e) {
                 if (_searchQuery.trim().isEmpty) return true;
                 return e.value.contains(_searchQuery) || e.key.contains(_searchQuery);
               }).toList();
+
+              final double liveCredit = widget.engine.fuelPumpRealtimeBalanceYer;
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
@@ -1291,19 +1585,22 @@ jobs:
                               children: [
                                 const Text("الرصيد النقدي", style: TextStyle(fontSize: 12, color: Colors.white70)),
                                 const SizedBox(height: 4),
-                                Text("$cashBal ريال", style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+                                Text("$cashBal ريال", style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
                               ],
                             ),
                           ),
-                          Container(width: 1, height: 44, color: Colors.white24),
-                          const SizedBox(width: 16),
+                          Container(width: 1, height: 48, color: Colors.white24),
+                          const SizedBox(width: 14),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text("رصيد الاستخدام", style: TextStyle(fontSize: 12, color: Color(0xFF6EE7B7))),
+                                const Text("عداد رصيد الاستخدام", style: TextStyle(fontSize: 12, color: Color(0xFF6EE7B7))),
                                 const SizedBox(height: 4),
-                                Text("$creditBal ريال", style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Color(0xFF6EE7B7))),
+                                Text(
+                                  "${liveCredit.toStringAsFixed(3)} ريال",
+                                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, fontFamily: 'monospace', color: Color(0xFF6EE7B7)),
+                                ),
                               ],
                             ),
                           ),
@@ -1323,7 +1620,7 @@ jobs:
                             children: [
                               Expanded(
                                 child: ChoiceChip(
-                                  label: const Text("تحويل نقدي"),
+                                  label: const Text("تحويل نقدي (0% عمولة)"),
                                   selected: _transferMode == 'cash',
                                   selectedColor: const Color(0xFF3B82F6),
                                   onSelected: (_) => setState(() => _transferMode = 'cash'),
@@ -1410,7 +1707,7 @@ jobs:
                                   if (_transferMode == 'cash') {
                                     _feedback = "✅ تم تحويل $amt ريال نقدي بنجاح";
                                   } else {
-                                    _feedback = "✅ تمت التغذية! خُصم ${res['net_deducted']} ريال وأُضيف ${res['credit_delivered']} ريال رصيد استخدام";
+                                    _feedback = "✅ تمت التغذية! خُصم من النقد ${res['net_deducted']} ريال (ربحك: ${res['sender_discount']} ريال) وأُضيف ${res['credit_delivered']} ريال رصيد استخدام";
                                   }
                                 });
                               } catch (e) {
@@ -1446,7 +1743,7 @@ jobs:
                           if (filteredContacts.isEmpty)
                             const Padding(
                               padding: EdgeInsets.all(12.0),
-                              child: Text("لا توجد جهات مطابقة. يمكنك إضافة أسماء من تبويب (الإدارة).", style: TextStyle(fontSize: 12, color: Colors.white54)),
+                              child: Text("لا توجد جهات مطابقة.", style: TextStyle(fontSize: 12, color: Colors.white54)),
                             ),
                           ...filteredContacts.map((entry) => ListTile(
                                 contentPadding: EdgeInsets.zero,
@@ -1466,35 +1763,134 @@ jobs:
               );
             }
 
-            Widget _buildTunnelAndEcoTab(Map<String, dynamic> w, int creditBal, bool ecoMode) {
+            // التبويب 2: عداد مضخة البنزين بالفاصلة العشرية + خزان الـ 100 ميجا / 80 ميجا
+            Widget _buildFuelPumpTunnelTab(Map<String, dynamic> w, Map<String, dynamic> cfg, bool ecoMode) {
+              final double liveBalanceYer = widget.engine.fuelPumpRealtimeBalanceYer;
+              final double sessionSpentYer = widget.engine.currentSessionConsumedYer;
+              final double remMb = widget.engine.remainingChunkMb;
+              final double usedMb = widget.engine.consumedChunkMb;
+              final int chunkMaxMb = widget.engine.serverChunkSizeMb;
+              final int triggerMb = widget.engine.serverRefillTriggerMb;
+              final double tankProgress = widget.engine.activeChunkTotalBytes > 0
+                  ? (remMb / chunkMaxMb).clamp(0.0, 1.0)
+                  : 0.0;
+
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // شاشة عداد البنزين الرقمية الدقيقة بالفاصلة العشرية
                     Container(
-                      padding: const EdgeInsets.all(24),
+                      padding: const EdgeInsets.all(22),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1E293B),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: widget.engine.isVpnActive ? const Color(0xFF10B981) : Colors.white12),
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF0F172A), Color(0xFF1E293B)],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: widget.engine.isVpnActive ? const Color(0xFF10B981) : Colors.white12,
+                          width: 2,
+                        ),
                       ),
                       child: Column(
                         children: [
-                          Icon(
-                            widget.engine.isVpnActive ? Icons.verified_user : Icons.shield_outlined,
-                            size: 64,
-                            color: widget.engine.isVpnActive ? const Color(0xFF10B981) : Colors.white38,
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.local_gas_station,
+                                    color: widget.engine.isVpnActive ? const Color(0xFF10B981) : Colors.white54,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    widget.engine.isVpnActive ? "عداد النفق يعمل لحظياً" : "العداد متوقف",
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                                  ),
+                                ],
+                              ),
+                              if (widget.engine.isPurchasingChunk)
+                                const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.amber),
+                                ),
+                            ],
                           ),
-                          const SizedBox(height: 12),
-                          Text(
-                            widget.engine.isVpnActive ? "النفق متصل ونشط" : "النفق متوقف",
-                            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                          const SizedBox(height: 18),
+                          const Text("الرصيد المتبقي اللحظي (بالفاصلة العشرية)", style: TextStyle(fontSize: 12, color: Colors.white60)),
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF020617),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(color: const Color(0xFF10B981).withOpacity(0.5)),
+                            ),
+                            child: Text(
+                              "${liveBalanceYer.toStringAsFixed(3)} ريال",
+                              style: const TextStyle(
+                                fontSize: 34,
+                                fontWeight: FontWeight.w900,
+                                fontFamily: 'monospace',
+                                color: Color(0xFF10B981),
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceAround,
+                            children: [
+                              Column(
+                                children: [
+                                  const Text("صرف الدفعة الحالية", style: TextStyle(fontSize: 11, color: Colors.white54)),
+                                  Text(
+                                    "${sessionSpentYer.toStringAsFixed(3)} ريال",
+                                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, fontFamily: 'monospace', color: Colors.amber),
+                                  ),
+                                ],
+                              ),
+                              Column(
+                                children: [
+                                  const Text("المستهلك من الدفعة", style: TextStyle(fontSize: 11, color: Colors.white54)),
+                                  Text(
+                                    "${usedMb.toStringAsFixed(2)} MB",
+                                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                                  ),
+                                ],
+                              ),
+                              Column(
+                                children: [
+                                  const Text("متبقي بالخزان", style: TextStyle(fontSize: 11, color: Colors.white54)),
+                                  Text(
+                                    "${remMb.toStringAsFixed(2)} MB",
+                                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, fontFamily: 'monospace', color: Color(0xFF6EE7B7)),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: LinearProgressIndicator(
+                              value: tankProgress,
+                              minHeight: 10,
+                              backgroundColor: Colors.white12,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                remMb <= (chunkMaxMb - triggerMb) ? Colors.amber : const Color(0xFF10B981),
+                              ),
+                            ),
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            "رصيد الاستخدام المتاح: $creditBal ريال",
-                            style: const TextStyle(fontSize: 14, color: Color(0xFF6EE7B7)),
+                            "حجم الدفعة: $chunkMaxMb MB | يشتري دفعة جديدة تلقائياً عند استهلاك $triggerMb MB",
+                            style: const TextStyle(fontSize: 11, color: Colors.white54),
                           ),
                           const SizedBox(height: 20),
                           SizedBox(
@@ -1508,22 +1904,36 @@ jobs:
                               onPressed: () async {
                                 try {
                                   if (!widget.engine.isVpnActive) {
-                                    await widget.engine.startSmartConnection(w);
-                                    setState(() => _feedback = "✅ تم تفعيل النفق وفتح البوابة بنجاح");
+                                    await widget.engine.startSmartConnection(w, cfg);
+                                    setState(() => _feedback = "✅ تم التحقق من الشبكة المفعلة وتشغيل عداد النفق");
                                   } else {
                                     await widget.engine.stopSmartConnection();
-                                    setState(() => _feedback = "تم إيقاف النفق وإغلاق البوابة");
+                                    setState(() => _feedback = "تم إيقاف النفق وحفظ قراءة العداد");
                                   }
                                 } catch (e) {
                                   setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                                 }
                               },
                               child: Text(
-                                widget.engine.isVpnActive ? "إيقاف النفق" : "تشغيل النفق الآن",
+                                widget.engine.isVpnActive ? "إيقاف النفق" : "تشغيل النفق والعداد الآن",
                                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                               ),
                             ),
                           ),
+                          if (widget.engine.isVpnActive) ...[
+                            const SizedBox(height: 10),
+                            OutlinedButton.icon(
+                              icon: const Icon(Icons.speed, color: Colors.amber, size: 18),
+                              label: const Text("اختبار سحب 25 MB لرؤية حركة الفاصلة والشراء عند 80 MB", style: TextStyle(fontSize: 12)),
+                              onPressed: () async {
+                                try {
+                                  await widget.engine.simulateFastFuelConsumption(25);
+                                } catch (e) {
+                                  setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
+                                }
+                              },
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -1534,12 +1944,12 @@ jobs:
                       child: SwitchListTile(
                         contentPadding: EdgeInsets.zero,
                         title: const Text("الوضع الاقتصادي لتوفير الرصيد", style: TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: const Text("خفض تلقائي لجودة الفيديو لتقليل الصرف إلى الحد الأدنى", style: TextStyle(fontSize: 12, color: Colors.white70)),
+                        subtitle: const Text("خفض تلقائي لجودة الفيديو لإبطاء دوران عداد الاستهلاك", style: TextStyle(fontSize: 12, color: Colors.white70)),
                         value: ecoMode,
                         activeColor: const Color(0xFF10B981),
                         onChanged: (val) async {
                           await widget.engine.toggleMyEcoMode(val);
-                          setState(() => _feedback = val ? "✅ تم تفعيل الوضع الاقتصادي لهذا الجهاز" : "تم إيقاف الوضع الاقتصادي");
+                          setState(() => _feedback = val ? "✅ تم تفعيل الوضع الاقتصادي" : "تم إيقاف الوضع الاقتصادي");
                         },
                       ),
                     ),
@@ -1626,7 +2036,7 @@ jobs:
                       Container(
                         padding: const EdgeInsets.all(20),
                         decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
-                        child: const Text("لا توجد أجهزة مرتبطة حالياً. امسح رمز أي جهاز عائلي لإدارة وقته وخيارات الحظر.", style: TextStyle(fontSize: 13, color: Colors.white60)),
+                        child: const Text("لا توجد أجهزة مرتبطة حالياً.", style: TextStyle(fontSize: 13, color: Colors.white60)),
                       ),
                     ...linkedChildren.map((cid) => _buildChildControlCard(cid.toString())),
                   ],
@@ -1646,7 +2056,6 @@ jobs:
                   final bool locked = (c['parental_locked'] ?? false) == true;
                   final bool childEco = (c['eco_mode'] ?? false) == true;
                   final int timeLimit = ((c['daily_time_limit_mins'] ?? 0) as num).toInt();
-                  final int usedTime = ((c['used_time_today_mins'] ?? 0) as num).toInt();
                   final List<String> blockedCats = List<String>.from((c['blocked_categories'] as List<dynamic>?) ?? []);
                   final List<String> customDomains = List<String>.from((c['custom_blocked_domains'] as List<dynamic>?) ?? []);
 
@@ -1674,7 +2083,6 @@ jobs:
                             ),
                           ],
                         ),
-                        Text(locked ? "الحالة: مقفل بأمر الرقابة الأبوية" : "المستهلك اليوم: $usedTime دقيقة", style: const TextStyle(fontSize: 12, color: Colors.white70)),
                         const Divider(height: 20, color: Colors.white12),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
@@ -1705,8 +2113,6 @@ jobs:
                           ],
                         ),
                         const SizedBox(height: 8),
-                        const Text("قوائم الحظر المرحلية:", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 6),
                         Wrap(
                           spacing: 8,
                           children: [
@@ -1720,7 +2126,7 @@ jobs:
                               },
                             ),
                             FilterChip(
-                              label: const Text("حظر التواصل الاجتماعي"),
+                              label: const Text("حظر التواصل"),
                               selected: blockedCats.contains('social'),
                               onSelected: (sel) {
                                 final next = List<String>.from(blockedCats);
@@ -1739,11 +2145,10 @@ jobs:
                             ),
                           ],
                         ),
-                        const SizedBox(height: 8),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text("روابط مخصصة محظورة (${customDomains.length})", style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                            Text("روابط مخصصة (${customDomains.length})", style: const TextStyle(fontSize: 12, color: Colors.white70)),
                             TextButton.icon(
                               icon: const Icon(Icons.add_moderator, size: 16),
                               label: const Text("إدارة الروابط"),
@@ -1813,15 +2218,102 @@ jobs:
               );
             }
 
-            Widget _buildContactsAndManagementTab(String myId) {
+            // التبويب 4: الإدارة + سحب مستحقات الشبكة المرتبطة بالمحفظة (تلقائي أو بطلب)
+            Widget _buildContactsAndHostWalletTab(String myId) {
               final idCtrl = TextEditingController();
               final nameCtrl = TextEditingController();
+              final db = FirebaseFirestore.instance;
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // قسم الشبكات المرتبطة بهذه المحفظة (يظهر لصاحب الشبكة المربوط بمحفظته)
+                    StreamBuilder<QuerySnapshot>(
+                      stream: db.collection('hosts').where('owner_wallet_id', isEqualTo: myId).snapshots(),
+                      builder: (context, hostSnap) {
+                        if (!hostSnap.hasData || hostSnap.data!.docs.isEmpty) {
+                          return const SizedBox.shrink();
+                        }
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: hostSnap.data!.docs.map((doc) {
+                            final h = doc.data() as Map<String, dynamic>;
+                            final String hostId = doc.id;
+                            final String netName = (h['network_name'] ?? hostId).toString();
+                            final int dueYer = ((h['amount_due_yer'] ?? 0) as num).toInt();
+                            final num wanMb = (h['current_month_wan_mb'] ?? 0) as num;
+                            final bool autoTransfer = (h['auto_transfer_to_wallet'] ?? false) == true;
+
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 16),
+                              padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                gradient: const LinearGradient(colors: [Color(0xFF1E3A8A), Color(0xFF0F172A)]),
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text("📡 مستحقات شبكتي: $netName", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                        decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(10)),
+                                        child: Text("مرتبطة بـ #$myId", style: const TextStyle(fontSize: 11, color: Colors.amber)),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Text("إجمالي الدفعات المباعة: ${wanMb.toStringAsFixed(0)} MB", style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                                  const SizedBox(height: 4),
+                                  Text("الرصيد المتاح للسحب الفوري: $dueYer ريال", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Colors.amber)),
+                                  const Divider(color: Colors.white24, height: 18),
+                                  SwitchListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    dense: true,
+                                    title: const Text("تحويل المستحقات تلقائياً إلى محفظتي", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                                    subtitle: const Text("إيداع حصة كل دفعة 100MB فوراً في رصيدك النقدي", style: TextStyle(fontSize: 11, color: Colors.white70)),
+                                    value: autoTransfer,
+                                    activeColor: const Color(0xFF10B981),
+                                    onChanged: (val) async {
+                                      await widget.engine.toggleHostAutoTransfer(hostId, val);
+                                      setState(() => _feedback = val ? "✅ تم تفعيل التحويل التلقائي لمستحقات الشبكة إلى محفظتك" : "تم ضبط السحب ليكون يدوياً بطلب منك");
+                                    },
+                                  ),
+                                  const SizedBox(height: 8),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: ElevatedButton.icon(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: Colors.amber,
+                                        foregroundColor: Colors.black,
+                                      ),
+                                      icon: const Icon(Icons.download_for_offline),
+                                      label: const Text("سحب المستحقات الآن إلى الرصيد النقدي", style: TextStyle(fontWeight: FontWeight.bold)),
+                                      onPressed: dueYer > 0
+                                          ? () async {
+                                              try {
+                                                final pulled = await widget.engine.withdrawHostEarningsToMyWallet(hostId);
+                                                setState(() => _feedback = "✅ تم سحب $pulled ريال من مستحقات الشبكة إلى رصيدك النقدي!");
+                                              } catch (e) {
+                                                setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
+                                              }
+                                            }
+                                          : null,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }).toList(),
+                        );
+                      },
+                    ),
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
@@ -1829,8 +2321,6 @@ jobs:
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           const Text("حفظ جهة في القائمة المحلية", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          const SizedBox(height: 6),
-                          const Text("تُحفظ الأسماء على جهازك فقط لسهولة البحث والتحويل السريع.", style: TextStyle(fontSize: 12, color: Colors.white60)),
                           const SizedBox(height: 12),
                           TextField(
                             controller: idCtrl,
