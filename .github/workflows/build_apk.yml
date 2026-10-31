@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Clean LVNO V5 (Mandarin Theme + Camera Scanner + Network Lock)
+      - name: Generate LVNO SmartClient V10 (Full + Security + DNS)
         shell: python
         run: |
           import os, shutil, json, subprocess, re
@@ -68,9 +68,9 @@ jobs:
               open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 
           pubspec_txt = '''name: smartclient
-          description: Unified Commercial Network App V5
+          description: LVNO SmartClient V10 - Portable Quota + Sessions + Security
           publish_to: 'none'
-          version: 5.1.0+15
+          version: 6.0.0+20
 
           environment:
             sdk: '>=3.3.0 <4.0.0'
@@ -117,6 +117,8 @@ jobs:
 
               private var vpnInterface: ParcelFileDescriptor? = null
               private var workerThread: Thread? = null
+              private var pendingDns1: String = "94.140.14.14"
+              private var pendingDns2: String = "94.140.15.15"
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   val action = intent?.action
@@ -133,15 +135,15 @@ jobs:
                           parentalLocked.set(locked)
                           blockedDomains.clear()
                           blockedDomains.addAll(blockedList)
-                          if (locked) {
-                              stopVpnTunnel()
-                          }
+                          if (locked) stopVpnTunnel()
                       }
                       return START_STICKY
                   }
                   if (!isRunning.get() && !parentalLocked.get()) {
                       val eco = intent?.getBooleanExtra("ecoMode", false) ?: false
                       ecoModeEnabled.set(eco)
+                      pendingDns1 = intent?.getStringExtra("dnsPrimary") ?: "94.140.14.14"
+                      pendingDns2 = intent?.getStringExtra("dnsFallback") ?: "94.140.15.15"
                       startVpnTunnel()
                   }
                   return START_STICKY
@@ -159,8 +161,8 @@ jobs:
                           .setSession("النفق الموحد")
                           .setMtu(mtuSize)
                           .addAddress("10.88.0.2", 24)
-                          .addDnsServer("1.1.1.3")
-                          .addDnsServer("1.0.0.3")
+                          .addDnsServer(pendingDns1)
+                          .addDnsServer(pendingDns2)
                           .addRoute("10.99.99.0", 24)
                           .addRoute("10.88.0.0", 24)
 
@@ -228,6 +230,7 @@ jobs:
           import android.net.ConnectivityManager
           import android.net.TrafficStats
           import android.net.VpnService
+          import android.os.Build
           import android.provider.Settings
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
@@ -244,6 +247,8 @@ jobs:
               private var pendingResult: MethodChannel.Result? = null
               private var pendingQrResult: MethodChannel.Result? = null
               private var pendingEcoMode: Boolean = false
+              private var pendingDns1: String = "94.140.14.14"
+              private var pendingDns2: String = "94.140.15.15"
 
               private fun getCurrentGatewayIp(): String {
                   return try {
@@ -253,9 +258,7 @@ jobs:
                       val routes = linkProperties.routes ?: emptyList()
                       val defaultRoute = routes.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }
                       defaultRoute?.gateway?.hostAddress ?: ""
-                  } catch (e: Exception) {
-                      ""
-                  }
+                  } catch (e: Exception) { "" }
               }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -267,6 +270,16 @@ jobs:
                           "getDeviceHardwareId" -> {
                               val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown_hw"
                               result.success(androidId)
+                          }
+                          "getDeviceInfo" -> {
+                              val map = HashMap<String, String>()
+                              map["model"] = Build.MODEL ?: "unknown"
+                              map["manufacturer"] = Build.MANUFACTURER ?: "unknown"
+                              map["brand"] = Build.BRAND ?: "unknown"
+                              map["device"] = Build.DEVICE ?: "unknown"
+                              map["os_version"] = Build.VERSION.RELEASE ?: "unknown"
+                              map["sdk_int"] = Build.VERSION.SDK_INT.toString()
+                              result.success(map)
                           }
                           "getCurrentGatewayIp" -> {
                               Thread {
@@ -335,9 +348,7 @@ jobs:
                                           s2.connect(InetSocketAddress(gatewayIp, 80), 1200)
                                           s2.close()
                                           verified = true
-                                      } catch (_: Exception) {
-                                          verified = false
-                                      }
+                                      } catch (_: Exception) { verified = false }
                                   }
                                   runOnUiThread { result.success(verified) }
                               }.start()
@@ -348,13 +359,9 @@ jobs:
                                   intent.putExtra("SCAN_MODE", "QR_CODE_MODE")
                                   pendingQrResult = result
                                   startActivityForResult(intent, QR_REQUEST_CODE)
-                              } catch (e: Exception) {
-                                  result.success("")
-                              }
+                              } catch (e: Exception) { result.success("") }
                           }
-                          "isVpnRunning" -> {
-                              result.success(VpnTunnelService.isRunning.get())
-                          }
+                          "isVpnRunning" -> { result.success(VpnTunnelService.isRunning.get()) }
                           "pollRealtimeDeltaBytes" -> {
                               if (!VpnTunnelService.isRunning.get()) {
                                   result.success(0)
@@ -367,9 +374,7 @@ jobs:
                                   val nowTotal = rx + tx
                                   if (VpnTunnelService.lastOsTotalBytes > 0L && nowTotal > VpnTunnelService.lastOsTotalBytes) {
                                       val osDelta = nowTotal - VpnTunnelService.lastOsTotalBytes
-                                      if (osDelta > delta) {
-                                          delta = osDelta
-                                      }
+                                      if (osDelta > delta) delta = osDelta
                                   }
                                   VpnTunnelService.lastOsTotalBytes = nowTotal
                               }
@@ -378,6 +383,8 @@ jobs:
                           }
                           "startVpn" -> {
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
+                              pendingDns1 = call.argument<String>("dnsPrimary") ?: "94.140.14.14"
+                              pendingDns2 = call.argument<String>("dnsFallback") ?: "94.140.15.15"
                               val prepareIntent = VpnService.prepare(this)
                               if (prepareIntent != null) {
                                   pendingResult = result
@@ -415,6 +422,8 @@ jobs:
               private fun launchVpnService() {
                   val serviceIntent = Intent(this, VpnTunnelService::class.java).apply {
                       putExtra("ecoMode", pendingEcoMode)
+                      putExtra("dnsPrimary", pendingDns1)
+                      putExtra("dnsFallback", pendingDns2)
                   }
                   startService(serviceIntent)
               }
@@ -487,22 +496,32 @@ jobs:
           </manifest>'''
           write_clean("android/app/src/main/AndroidManifest.xml", manifest_xml)
 
-          print("PART1_DONE_CORE_FILES_READY")
-          core_code = '''import 'dart:async';
+          print("PART1_DONE_ANDROID_NATIVE_READY")
+		  core_code = '''
+		  import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
+          import 'dart:math';
           import 'package:flutter/foundation.dart';
           import 'package:flutter/services.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
+          import 'package:crypto/crypto.dart';
 
           class SmartClientEngine extends ChangeNotifier {
             String walletId = "";
             String currentHostId;
+            String currentSessionId = "";
             bool isVpnActive = false;
             bool ecoMode = false;
             bool isPurchasingChunk = false;
+            bool isStartingSession = false;
+            bool isReporting = false;
+            bool shouldStopForLowBalance = false;
             String lastRouteType = "unknown";
             String lastDataSource = "unknown";
+            String cachedGatewayIp = "";
+            String cachedDnsPrimary = "94.140.14.14";
+            String cachedDnsFallback = "94.140.15.15";
 
             int activeChunkTotalBytes = 0;
             int activeChunkConsumedBytes = 0;
@@ -512,9 +531,16 @@ jobs:
             int serverRefillTriggerMb = 80;
             int serverCreditBalanceYer = 0;
             double liveSpeedKbps = 0.0;
+            double lifetimeConsumedMb = 0.0;
+            double portableMb = 0.0;
+            double portableValueYer = 0.0;
+
+            double _pendingMbReport = 0.0;
+            int _ticksSinceReport = 0;
+            int _ticksSinceHeartbeat = 0;
 
             Timer? _fuelPumpTimer;
-            Timer? _mikrotikKeepAliveTimer;
+            Timer? _networkCheckTimer;
             int _ticksCounter = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
@@ -553,6 +579,38 @@ jobs:
               return usedRatio * currentChunkPriceYer;
             }
 
+            // ============ DEVICE FINGERPRINT ============
+            Future<Map<String, String>> getDeviceFingerprint() async {
+              String androidId = "dev_default_01";
+              Map<String, String> devInfo = {};
+
+              try {
+                final id = await _vpnChannel.invokeMethod<String>('getDeviceHardwareId');
+                if (id != null && id.isNotEmpty) androidId = id;
+              } catch (_) {}
+
+              try {
+                final info = await _vpnChannel.invokeMethod<Map>('getDeviceInfo');
+                if (info != null) {
+                  devInfo = info.map((k, v) => MapEntry(k.toString(), v.toString()));
+                }
+              } catch (_) {}
+
+              final raw = "$androidId|${devInfo['model'] ?? ''}|${devInfo['manufacturer'] ?? ''}|${devInfo['brand'] ?? ''}|${devInfo['device'] ?? ''}|${devInfo['os_version'] ?? ''}";
+              final hash = sha256.convert(utf8.encode(raw)).toString();
+
+              return {
+                'android_id': androidId,
+                'model': devInfo['model'] ?? '',
+                'manufacturer': devInfo['manufacturer'] ?? '',
+                'brand': devInfo['brand'] ?? '',
+                'device': devInfo['device'] ?? '',
+                'os_version': devInfo['os_version'] ?? '',
+                'sdk_int': devInfo['sdk_int'] ?? '',
+                'fingerprint_hash': hash,
+              };
+            }
+
             Future<String> getDeviceHardwareId() async {
               try {
                 final id = await _vpnChannel.invokeMethod<String>('getDeviceHardwareId');
@@ -562,6 +620,7 @@ jobs:
               }
             }
 
+            // ============ QUOTA STATE (LOCAL PERSISTENCE) ============
             Future<void> loadSavedQuotaState() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getQuotaStateJson') ?? '{}';
@@ -569,6 +628,7 @@ jobs:
                 activeChunkTotalBytes = ((data['totalBytes'] ?? 0) as num).toInt();
                 activeChunkConsumedBytes = ((data['consumedBytes'] ?? 0) as num).toInt();
                 currentChunkPriceYer = ((data['chunkPriceYer'] ?? 25.0) as num).toDouble();
+                _pendingMbReport = ((data['pendingMbReport'] ?? 0.0) as num).toDouble();
                 notifyListeners();
               } catch (_) {}
             }
@@ -579,11 +639,13 @@ jobs:
                   'totalBytes': activeChunkTotalBytes,
                   'consumedBytes': activeChunkConsumedBytes,
                   'chunkPriceYer': currentChunkPriceYer,
+                  'pendingMbReport': _pendingMbReport,
                 });
                 await _vpnChannel.invokeMethod('saveQuotaStateJson', {'json': payload});
               } catch (_) {}
             }
 
+            // ============ LOCAL CONTACTS ============
             Future<Map<String, String>> getLocalContacts() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
@@ -614,11 +676,11 @@ jobs:
               }
             }
 
-            Future<void> _knockMikroTikGateway({required bool unlock}) async {
+            Future<void> _knockMikroTikGateway({required bool unlock, String gateway = '10.99.99.1'}) async {
               final int targetPort = unlock ? 9981 : 9982;
               try {
                 final socket = await Socket.connect(
-                  '10.99.99.1',
+                  gateway,
                   targetPort,
                   timeout: const Duration(milliseconds: 800),
                 );
@@ -626,6 +688,7 @@ jobs:
               } catch (_) {}
             }
 
+            // ============ HOST ROUTING CONFIG ============
             Future<Map<String, dynamic>> getHostRoutingConfig() async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(currentHostId).get();
@@ -640,7 +703,9 @@ jobs:
               };
             }
 
-            Future<Map<String, dynamic>> verifyManualHostActivation(String hostId, {bool requirePhysicalRouter = false}) async {
+            // ============ HOST ACTIVATION (MANDATORY PHYSICAL CHECK) ============
+            Future<Map<String, dynamic>> verifyManualHostActivation(
+                String hostId, {bool requirePhysicalRouter = false}) async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
               if (!hostSnap.exists) {
@@ -648,50 +713,60 @@ jobs:
               }
               final data = hostSnap.data()!;
               final status = (data['status'] ?? 'inactive').toString();
-              final bool manualApproved = (data['manual_admin_approved'] ?? true) == true;
-              final String secretCode = (data['activation_secret'] ?? 'MK-LVNO-2026').toString().trim();
-              final String expectedGateway = (data['gateway_ip'] ?? '192.168.88.1').toString().trim();
+              final bool manualApproved = (data['manual_admin_approved'] ?? false) == true;
+              final String secretCode = (data['activation_secret'] ?? '').toString().trim();
+              final String expectedGateway = (data['gateway_ip'] ?? '').toString().trim();
+              final int customApiPort = ((data['custom_api_port'] ?? 0) as num).toInt();
 
               if (status != 'active' || !manualApproved || secretCode.isEmpty) {
-                return {'ok': false, 'reason': 'الشبكة غير مفعلة يدوياً من إدارة النظام'};
+                return {'ok': false, 'reason': '⛔ الشبكة غير مفعلة من الإدارة'};
+              }
+              if (expectedGateway.isEmpty || customApiPort < 1024) {
+                return {'ok': false, 'reason': '⛔ الشبكة غير مهيأة (بوابة أو منفذ ناقص)'};
               }
 
-              if (requirePhysicalRouter && (data['enforce_physical_router_check'] ?? false) == true) {
-                final String currentGateway = await _vpnChannel.invokeMethod<String>('getCurrentGatewayIp') ?? '';
+              // ✅ MANDATORY PHYSICAL CHECK — NO FLAG
+              if (requirePhysicalRouter) {
+                final String currentGateway =
+                    await _vpnChannel.invokeMethod<String>('getCurrentGatewayIp') ?? '';
+
                 if (currentGateway.trim() != expectedGateway) {
                   return {
                     'ok': false,
-                    'reason': 'أنت غير متصل براوتر الميكروتك المطلوب.\\n'
+                    'reason': '⛔ أنت غير متصل براوتر الميكروتيك المعتمد\\n'
                               'المتوقع: $expectedGateway\\n'
                               'الحالي: ${currentGateway.isEmpty ? "غير متصل" : currentGateway}'
                   };
                 }
 
-                final int customApiPort = ((data['custom_api_port'] ?? 9728) as num).toInt();
                 final Map<dynamic, dynamic> idResult = await _vpnChannel.invokeMethod<Map>(
                   'verifyMikroTikIdentity',
                   {'gatewayIp': expectedGateway, 'customApiPort': customApiPort},
                 ) ?? {};
 
-                if ((idResult['isMikroTik'] ?? false) != true) {
-                  return {'ok': false, 'reason': 'الراوتر المتصل ليس ميكروتيك أو لا يستجيب على منفذ $customApiPort'};
+                if (idResult['isMikroTik'] != true) {
+                  return {'ok': false, 'reason': '⛔ الراوتر المتصل ليس ميكروتيك'};
                 }
-                if ((idResult['hasSpecialConfig'] ?? false) != true) {
-                  return {'ok': false, 'reason': 'الميكروتيك لا يحتوي على إعدادات النظام الخاصة (منفذ $customApiPort غير مُعد)'};
+                if (idResult['hasSpecialConfig'] != true) {
+                  return {'ok': false, 'reason': '⛔ الميكروتيك غير مهيأ (المنفذ $customApiPort مغلق)'};
                 }
               }
 
               currentHostId = hostId;
+              cachedGatewayIp = expectedGateway;
               return {'ok': true, 'data': data};
             }
 
+            // ============ DEVICE / WALLET REGISTRATION ============
             Future<String> registerOrRecoverDeviceWallet() async {
               final db = FirebaseFirestore.instance;
-              final deviceId = await getDeviceHardwareId();
+              final fp = await getDeviceFingerprint();
+              final deviceId = fp['android_id']!;
               await _ensureDefaultSystemSettings(db);
               await loadSavedQuotaState();
 
-              final check = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: false);
+              // ✅ MANDATORY PHYSICAL CHECK
+              final check = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
               if (check['ok'] != true) {
                 throw Exception(check['reason'] ?? "الشبكة غير مفعلة");
               }
@@ -704,6 +779,15 @@ jobs:
                 final devSnap = await tx.get(devRef);
                 if (devSnap.exists && devSnap.data()?['wallet_id'] != null) {
                   walletId = devSnap.data()!['wallet_id'].toString();
+                  // ✅ update fingerprint on each launch
+                  tx.set(devRef, {
+                    'model': fp['model'],
+                    'manufacturer': fp['manufacturer'],
+                    'brand': fp['brand'],
+                    'os_version': fp['os_version'],
+                    'fingerprint_hash': fp['fingerprint_hash'],
+                    'last_seen': FieldValue.serverTimestamp(),
+                  }, SetOptions(merge: true));
                   return walletId;
                 }
 
@@ -730,7 +814,15 @@ jobs:
                   'device_id': deviceId,
                   'wallet_id': newWalletId,
                   'registered_host_id': currentHostId,
-                  'created_at': FieldValue.serverTimestamp(),
+                  'model': fp['model'],
+                  'manufacturer': fp['manufacturer'],
+                  'brand': fp['brand'],
+                  'os_version': fp['os_version'],
+                  'fingerprint_hash': fp['fingerprint_hash'],
+                  'install_count': 1,
+                  'tamper_count': 0,
+                  'first_seen': FieldValue.serverTimestamp(),
+                  'last_seen': FieldValue.serverTimestamp(),
                 });
 
                 tx.set(walletRef, {
@@ -740,6 +832,13 @@ jobs:
                   'full_name': '',
                   'cash_balance_yer': 0,
                   'credit_balance_yer': 0,
+                  'portable_mb': 0.0,
+                  'portable_value_yer': 0.0,
+                  'lifetime_consumed_mb': 0.0,
+                  'current_session_id': '',
+                  'current_host_id': '',
+                  'pending_mb_since_report': 0.0,
+                  'session_started_mb': 0.0,
                   'tier': 'general',
                   'kyc_verified': false,
                   'custom_max_balance_yer': generalMaxBalance,
@@ -752,6 +851,8 @@ jobs:
                   'used_time_today_mins': 0,
                   'blocked_categories': <String>[],
                   'custom_blocked_domains': <String>[],
+                  'linked_children': <String>[],
+                  'tamper_count': 0,
                   'created_at': FieldValue.serverTimestamp(),
                 });
 
@@ -772,34 +873,344 @@ jobs:
                   'credit_receiver_bonus_pct': 3.0,
                   'general_tier_max_balance_yer': 10000,
                   'general_tier_daily_limit_yer': 5000,
+                  'heartbeat_interval_sec': 30,
+                  'stale_timeout_sec': 120,
+                  'tamper_threshold_mb': 5,
+                  'settlement_hour': 23,
+                  'settlement_minute': 30,
+                  'timezone': 'Asia/Aden',
+                  'dns_primary': '94.140.14.14',
+                  'dns_secondary': '94.140.15.15',
+                  'dns_filter_enabled': true,
                 });
               }
               final hostRef = db.collection('hosts').doc(currentHostId);
               if (!(await hostRef.get()).exists) {
                 await hostRef.set({
                   'host_id': currentHostId,
-                  'network_name': 'شبكة الهدى المفعلة',
+                  'network_name': 'شبكة جديدة',
                   'owner_wallet_id': '1001',
                   'auto_transfer_to_wallet': false,
                   'activation_secret': 'MK-LVNO-2026',
-                  'gateway_ip': '192.168.88.1',
+                  'gateway_ip': '192.168.1.21',
                   'custom_api_port': 9728,
                   'manual_admin_approved': true,
-                  'enforce_physical_router_check': false,
+                  'enforce_physical_router_check': true,
                   'status': 'active',
                   'current_month_wan_mb': 0,
                   'amount_due_yer': 0,
                   'total_settled_to_wallet_yer': 0,
-                  'use_my_port': false,
-                  'my_port_gateway': '',
-                  'host_wan_gateway': '',
                   'routing_preference': 'host_wan',
+                  'my_port_gateway': '',
                   'my_port_commission_pct': 15.0,
+                  'host_wan_gateway': '',
                 });
               }
             }
 
-            Future<bool> purchaseQuotaChunkFromServer() async {
+            // ============ SESSION MANAGEMENT ============
+            Future<Map<String, dynamic>> startSession() async {
+              if (isStartingSession) return {'ok': false, 'reason': 'عملية جارية'};
+              isStartingSession = true;
+
+              try {
+                final db = FirebaseFirestore.instance;
+                final wRef = db.collection('wallets').doc(walletId);
+                final sessionId = 's_${walletId}_${DateTime.now().millisecondsSinceEpoch}';
+
+                final result = await db.runTransaction((tx) async {
+                  final wSnap = await tx.get(wRef);
+                  if (!wSnap.exists) throw Exception("المحفظة غير موجودة");
+
+                  final w = wSnap.data()!;
+                  final portable = ((w['portable_mb'] ?? 0) as num).toDouble();
+                  final lifetime = ((w['lifetime_consumed_mb'] ?? 0) as num).toDouble();
+
+                  if (portable < 1.0) {
+                    throw Exception("الرصيد العائم فارغ — اشترِ دفعة أولاً");
+                  }
+
+                  // create session
+                  final sRef = db.collection('sessions').doc(sessionId);
+                  tx.set(sRef, {
+                    'wallet_id': walletId,
+                    'host_id': currentHostId,
+                    'session_start_total_mb': lifetime,
+                    'current_total_mb': lifetime,
+                    'reported_mb': 0.0,
+                    'local_mb_since_report': 0.0,
+                    'started_at': FieldValue.serverTimestamp(),
+                    'last_heartbeat': FieldValue.serverTimestamp(),
+                    'last_report_at': FieldValue.serverTimestamp(),
+                    'status': 'active',
+                  });
+
+                  // update wallet
+                  tx.update(wRef, {
+                    'current_session_id': sessionId,
+                    'current_host_id': currentHostId,
+                    'session_started_mb': lifetime,
+                    'pending_mb_since_report': 0.0,
+                  });
+
+                  return {
+                    'session_id': sessionId,
+                    'lifetime_at_start': lifetime,
+                  };
+                });
+
+                currentSessionId = result['session_id'].toString();
+                _pendingMbReport = 0.0;
+                _ticksSinceHeartbeat = 0;
+                _ticksSinceReport = 0;
+                isStartingSession = false;
+                return {'ok': true, ...result};
+              } catch (e) {
+                isStartingSession = false;
+                return {'ok': false, 'reason': e.toString().replaceAll('Exception: ', '')};
+              }
+            }
+
+            Future<void> sendHeartbeat() async {
+              if (currentSessionId.isEmpty) return;
+              try {
+                final db = FirebaseFirestore.instance;
+                await db.collection('sessions').doc(currentSessionId).update({
+                  'last_heartbeat': FieldValue.serverTimestamp(),
+                  'local_mb_since_report': _pendingMbReport,
+                  'current_total_mb': FieldValue.increment(_pendingMbReport),
+                });
+                await db.collection('wallets').doc(walletId).update({
+                  'pending_mb_since_report': _pendingMbReport,
+                  'last_seen_at': FieldValue.serverTimestamp(),
+                });
+              } catch (_) {}
+            }
+
+            Future<void> reportConsumption(double mbConsumed, {String trigger = 'periodic'}) async {
+              if (mbConsumed < 0.1 || currentSessionId.isEmpty) return;
+              if (isReporting) return;
+              isReporting = true;
+
+              try {
+                final db = FirebaseFirestore.instance;
+                final wRef = db.collection('wallets').doc(walletId);
+                final hRef = db.collection('hosts').doc(currentHostId);
+                final cfgRef = db.collection('settings').doc('global_config');
+                final sRef = db.collection('sessions').doc(currentSessionId);
+
+                await db.runTransaction((tx) async {
+                  final wSnap = await tx.get(wRef);
+                  final hSnap = await tx.get(hRef);
+                  final cfgSnap = await tx.get(cfgRef);
+                  final sSnap = await tx.get(sRef);
+
+                  if (!wSnap.exists || !hSnap.exists || !sSnap.exists) return;
+
+                  final w = wSnap.data()!;
+                  final cfg = cfgSnap.data() ?? {};
+                  final gbPrice = ((cfg['gb_price_consumer_yer'] ?? 250) as num).toDouble();
+                  final sysProfitPct = ((cfg['system_profit_pct'] ?? 10.0) as num).toDouble();
+
+                  final double mbCost = (mbConsumed / 1000.0) * gbPrice;
+                  final int mbCostInt = mbCost.round() < 1 ? 1 : mbCost.round();
+                  final int sysShare = (mbCostInt * sysProfitPct / 100).round();
+                  final int hostShare = mbCostInt - sysShare;
+
+                  final currentPortable = ((w['portable_mb'] ?? 0) as num).toDouble();
+                  final currentPortableVal = ((w['portable_value_yer'] ?? 0) as num).toDouble();
+
+                  // الحماية: لا نستهلك أكثر من المتاح
+                  final actualMb = mbConsumed > currentPortable ? currentPortable : mbConsumed;
+
+                  if (actualMb < 0.01) return;
+
+                  // 1) خصم من العائم + زيادة العداد التراكمي
+                  tx.update(wRef, {
+                    'portable_mb': currentPortable - actualMb,
+                    'portable_value_yer': currentPortableVal - mbCostInt,
+                    'lifetime_consumed_mb': FieldValue.increment(actualMb),
+                    'pending_mb_since_report': 0.0,
+                    'updated_at': FieldValue.serverTimestamp(),
+                  });
+
+                  // 2) دفع لصاحب الشبكة الحالية
+                  tx.set(hRef, {
+                    'current_month_wan_mb': FieldValue.increment(actualMb),
+                    'amount_due_yer': FieldValue.increment(hostShare),
+                    'last_heartbeat': FieldValue.serverTimestamp(),
+                  }, SetOptions(merge: true));
+
+                  // 3) ربح النظام
+                  tx.set(db.collection('admin_secret_vault').doc('system_income'), {
+                    'total_sys_profit_yer': FieldValue.increment(sysShare),
+                  }, SetOptions(merge: true));
+
+                  // 4) سجل العملية
+                  final txRef = db.collection('transactions').doc();
+                  tx.set(txRef, {
+                    'type': 'consumption',
+                    'wallet_id': walletId,
+                    'host_id': currentHostId,
+                    'session_id': currentSessionId,
+                    'mb_delta': actualMb,
+                    'mb_cost_yer': mbCostInt,
+                    'host_share_yer': hostShare,
+                    'sys_profit_yer': sysShare,
+                    'trigger': trigger,
+                    'data_source': lastDataSource,
+                    'timestamp': FieldValue.serverTimestamp(),
+                  });
+
+                  // 5) تحديث الجلسة
+                  tx.update(sRef, {
+                    'reported_mb': FieldValue.increment(actualMb),
+                    'local_mb_since_report': 0.0,
+                    'current_total_mb': FieldValue.increment(actualMb),
+                    'last_report_at': FieldValue.serverTimestamp(),
+                  });
+                });
+
+                _pendingMbReport = 0;
+                _ticksSinceReport = 0;
+              } catch (_) {
+                // إعادة المحاولة في الدورة التالية
+              } finally {
+                isReporting = false;
+              }
+            }
+
+            Future<void> closeSession({String reason = 'user_stop'}) async {
+              if (currentSessionId.isEmpty) return;
+              try {
+                // أرسل أي استهلاك متبقٍ
+                if (_pendingMbReport >= 0.1) {
+                  await reportConsumption(_pendingMbReport, trigger: 'session_close');
+                }
+
+                final db = FirebaseFirestore.instance;
+                final sRef = db.collection('sessions').doc(currentSessionId);
+                final wRef = db.collection('wallets').doc(walletId);
+
+                await db.runTransaction((tx) async {
+                  final sSnap = await tx.get(sRef);
+                  if (!sSnap.exists) return;
+                  if (sSnap.data()?['status'] != 'active') return;
+
+                  tx.update(sRef, {
+                    'status': 'closed',
+                    'closed_at': FieldValue.serverTimestamp(),
+                    'closed_reason': reason,
+                  });
+
+                  tx.update(wRef, {
+                    'current_session_id': '',
+                    'current_host_id': '',
+                    'pending_mb_since_report': 0.0,
+                  });
+                });
+
+                currentSessionId = "";
+                _pendingMbReport = 0;
+              } catch (_) {}
+            }
+
+            // ============ TAMPER DETECTION ============
+            Future<void> detectTamperOnBoot() async {
+              try {
+                final db = FirebaseFirestore.instance;
+                final wSnap = await db.collection('wallets').doc(walletId).get();
+                if (!wSnap.exists) return;
+                final w = wSnap.data()!;
+
+                final staleSessionId = (w['current_session_id'] ?? '').toString();
+                if (staleSessionId.isEmpty) return;
+
+                final sSnap = await db.collection('sessions').doc(staleSessionId).get();
+                if (!sSnap.exists) {
+                  // الجلسة غير موجودة لكن المحفظة تشير لها — تنظيف
+                  await db.collection('wallets').doc(walletId).update({
+                    'current_session_id': '',
+                    'current_host_id': '',
+                    'pending_mb_since_report': 0.0,
+                  });
+                  return;
+                }
+
+                final s = sSnap.data()!;
+                if (s['status'] != 'active') return;
+
+                final lastHb = s['last_heartbeat']?.toDate?.() as DateTime?;
+                final pendingMb = ((s['local_mb_since_report'] ?? 0) as num).toDouble();
+
+                // إذا كان آخر heartbeat قديم > 2 دقيقة → تسوية
+                if (lastHb != null && DateTime.now().difference(lastHb).inMinutes >= 2) {
+                  if (pendingMb > 0.1) {
+                    // نرسل تسوية إجبارية
+                    await _forceSettleStaleSession(staleSessionId, s, pendingMb);
+                  }
+                  await db.collection('sessions').doc(staleSessionId).update({
+                    'status': 'force_closed',
+                    'closed_at': FieldValue.serverTimestamp(),
+                    'closed_reason': 'stale_on_boot',
+                  });
+                  await db.collection('wallets').doc(walletId).update({
+                    'current_session_id': '',
+                    'current_host_id': '',
+                    'pending_mb_since_report': 0.0,
+                  });
+
+                  // سجّل تنبيه أمني
+                  await db.collection('alerts').add({
+                    'type': 'stale_session',
+                    'wallet_id': walletId,
+                    'session_id': staleSessionId,
+                    'host_id': s['host_id'],
+                    'gap_mb': pendingMb,
+                    'severity': 'medium',
+                    'resolved': false,
+                    'created_at': FieldValue.serverTimestamp(),
+                  });
+                }
+              } catch (_) {}
+            }
+
+            Future<void> _forceSettleStaleSession(
+                String sessionId, Map<String, dynamic> s, double mb) async {
+              try {
+                final db = FirebaseFirestore.instance;
+                final hRef = db.collection('hosts').doc((s['host_id'] ?? '').toString());
+                final cfgSnap = await db.collection('settings').doc('global_config').get();
+                final gb = ((cfgSnap.data()?['gb_price_consumer_yer'] ?? 250) as num).toDouble();
+                final sp = ((cfgSnap.data()?['system_profit_pct'] ?? 10.0) as num).toDouble();
+
+                final cost = (mb / 1000) * gb;
+                final hostShare = (cost * (1 - sp / 100)).round();
+
+                await db.runTransaction((tx) async {
+                  tx.set(hRef, {
+                    'current_month_wan_mb': FieldValue.increment(mb),
+                    'amount_due_yer': FieldValue.increment(hostShare),
+                  }, SetOptions(merge: true));
+
+                  final txRef = db.collection('transactions').doc();
+                  tx.set(txRef, {
+                    'type': 'consumption',
+                    'wallet_id': walletId,
+                    'host_id': s['host_id'],
+                    'session_id': sessionId,
+                    'mb_delta': mb,
+                    'mb_cost_yer': cost.round(),
+                    'host_share_yer': hostShare,
+                    'sys_profit_yer': cost.round() - hostShare,
+                    'trigger': 'stale_recovery',
+                    'timestamp': FieldValue.serverTimestamp(),
+                  });
+                });
+              } catch (_) {}
+            }
+            // ============ PURCHASE PORTABLE QUOTA ============
+            Future<bool> purchasePortableQuota() async {
               if (isPurchasingChunk) return false;
               isPurchasingChunk = true;
               notifyListeners();
@@ -808,7 +1219,6 @@ jobs:
                 final routingCfg = await getHostRoutingConfig();
                 final String routedVia = (routingCfg['routing_preference'] ?? 'host_wan').toString();
                 final String dataSource = routedVia == 'my_port' ? 'my_port' : 'host_wan';
-                final double myPct = ((routingCfg['my_port_commission_pct'] ?? 15.0) as num).toDouble();
 
                 final db = FirebaseFirestore.instance;
                 final wRef = db.collection('wallets').doc(walletId);
@@ -827,9 +1237,6 @@ jobs:
                   final hData = hSnap.data()!;
                   final cfg = cfgSnap.data() ?? {};
 
-                  final String ownerWalletId = (hData['owner_wallet_id'] ?? '').toString().trim();
-                  final bool autoSettle = (hData['auto_transfer_to_wallet'] ?? false) == true;
-
                   if ((hData['status'] ?? 'inactive') != 'active' || (hData['manual_admin_approved'] ?? true) != true) {
                     throw Exception("الشبكة غير مفعلة يدوياً من النظام");
                   }
@@ -837,70 +1244,33 @@ jobs:
                   final double gbPrice = ((cfg['gb_price_consumer_yer'] ?? 250) as num).toDouble();
                   final int chunkMb = ((cfg['quota_chunk_mb'] ?? 100) as num).toInt();
                   final int triggerMb = ((cfg['quota_refill_trigger_mb'] ?? 80) as num).toInt();
-                  final double sysProfitPct = ((cfg['system_profit_pct'] ?? 10.0) as num).toDouble();
 
                   final double rawChunkPrice = (chunkMb / 1000.0) * gbPrice;
                   final int chunkCostYer = rawChunkPrice.round() < 1 ? 1 : rawChunkPrice.round();
 
                   final int currentCredit = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
                   if (currentCredit < chunkCostYer) {
-                    throw Exception("رصيد الاستخدام ($currentCredit ريال) لا يكفي لشراء دفعة جديدة ($chunkCostYer ريال / $chunkMb ميجا)");
+                    throw Exception("رصيد الاستخدام ($currentCredit ريال) لا يكفي لشراء دفعة ($chunkCostYer ريال)");
                   }
 
-                  final int myCommissionYer = routedVia == 'my_port'
-                      ? chunkCostYer
-                      : (chunkCostYer * myPct / 100.0).round();
-                  final int hostShareYer = routedVia == 'my_port'
-                      ? 0
-                      : (chunkCostYer - myCommissionYer);
-                  final int sysProfitYer = (chunkCostYer * (sysProfitPct / 100.0)).round();
-
+                  // خصم من credit + إضافة للـ portable (رصيد عائم)
                   tx.update(wRef, {
                     'credit_balance_yer': currentCredit - chunkCostYer,
+                    'portable_mb': FieldValue.increment(chunkMb),
+                    'portable_value_yer': FieldValue.increment(chunkCostYer),
                     'updated_at': FieldValue.serverTimestamp(),
                   });
 
-                  if (autoSettle && ownerWalletId.isNotEmpty) {
-                    final ownerRef = db.collection('wallets').doc(ownerWalletId);
-                    tx.set(ownerRef, {
-                      'cash_balance_yer': FieldValue.increment(hostShareYer),
-                      'updated_at': FieldValue.serverTimestamp(),
-                    }, SetOptions(merge: true));
-                    tx.set(hRef, {
-                      'current_month_wan_mb': FieldValue.increment(chunkMb),
-                      'total_settled_to_wallet_yer': FieldValue.increment(hostShareYer),
-                      'last_heartbeat': FieldValue.serverTimestamp(),
-                    }, SetOptions(merge: true));
-                  } else {
-                    tx.set(hRef, {
-                      'current_month_wan_mb': FieldValue.increment(chunkMb),
-                      'amount_due_yer': FieldValue.increment(hostShareYer),
-                      'last_heartbeat': FieldValue.serverTimestamp(),
-                    }, SetOptions(merge: true));
-                  }
-
-                  final vaultRef = db.collection('admin_secret_vault').doc(currentHostId);
-                  tx.set(vaultRef, {
-                    'host_id': currentHostId,
-                    'wan_mb_visible_to_host': FieldValue.increment(chunkMb),
-                    'total_charged_to_consumers_yer': FieldValue.increment(chunkCostYer),
-                    'host_payout_yer': FieldValue.increment(hostShareYer),
-                    'my_commission_yer': FieldValue.increment(myCommissionYer),
-                    'net_admin_profit_yer': FieldValue.increment(sysProfitYer),
-                    'updated_at': FieldValue.serverTimestamp(),
-                  }, SetOptions(merge: true));
-
+                  // سجل الشراء (بدون host — عائم)
                   final txRec = db.collection('transactions').doc();
                   tx.set(txRec, {
-                    'type': 'quota_purchase',
+                    'type': 'portable_purchase',
                     'wallet_id': walletId,
                     'host_id': currentHostId,
                     'chunk_mb': chunkMb,
                     'chunk_cost_yer': chunkCostYer,
                     'data_source': dataSource,
                     'routed_via': routedVia,
-                    'my_commission_yer': myCommissionYer,
-                    'host_share_yer': hostShareYer,
                     'timestamp': FieldValue.serverTimestamp(),
                   });
 
@@ -909,11 +1279,7 @@ jobs:
                     'triggerMb': triggerMb,
                     'chunkCostYer': chunkCostYer,
                     'gbPrice': gbPrice,
-                    'newServerCredit': currentCredit - chunkCostYer,
-                    'routed_via': routedVia,
-                    'data_source': dataSource,
-                    'my_commission_yer': myCommissionYer,
-                    'host_share_yer': hostShareYer,
+                    'newCredit': currentCredit - chunkCostYer,
                   };
                 });
 
@@ -921,17 +1287,17 @@ jobs:
                 final int prevRemainingBytes = (activeChunkTotalBytes - activeChunkConsumedBytes) > 0
                     ? (activeChunkTotalBytes - activeChunkConsumedBytes)
                     : 0;
-
                 activeChunkTotalBytes = prevRemainingBytes + addedBytes;
                 activeChunkConsumedBytes = 0;
-
                 serverChunkSizeMb = (res['chunkMb'] as num).toInt();
                 serverRefillTriggerMb = (res['triggerMb'] as num).toInt();
                 currentGbPriceYer = (res['gbPrice'] as num).toDouble();
                 currentChunkPriceYer = (activeChunkTotalBytes / (1024.0 * 1024.0 * 1000.0)) * currentGbPriceYer;
-                serverCreditBalanceYer = (res['newServerCredit'] as num).toInt();
-                lastRouteType = (res['routed_via'] ?? 'host_network').toString();
-                lastDataSource = (res['data_source'] ?? 'host_wan').toString();
+                serverCreditBalanceYer = (res['newCredit'] as num).toInt();
+                portableMb = portableMb + (res['chunkMb'] as num).toDouble();
+                portableValueYer = portableValueYer + (res['chunkCostYer'] as num).toDouble();
+                lastDataSource = dataSource;
+                lastRouteType = routedVia;
 
                 await persistQuotaState();
                 isPurchasingChunk = false;
@@ -944,6 +1310,7 @@ jobs:
               }
             }
 
+            // ============ HOST WITHDRAWAL ============
             Future<int> withdrawHostEarningsToMyWallet(String hostId) async {
               final db = FirebaseFirestore.instance;
               final hRef = db.collection('hosts').doc(hostId);
@@ -981,18 +1348,26 @@ jobs:
               });
             }
 
+            // ============ HOST AUTO TRANSFER ============
             Future<void> toggleHostAutoTransfer(String hostId, bool autoEnabled) async {
               await FirebaseFirestore.instance.collection('hosts').doc(hostId).update({
                 'auto_transfer_to_wallet': autoEnabled,
               });
             }
 
-            Future<void> syncDevicePolicyFromWalletDoc(Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
+            // ============ SYNC DEVICE POLICY ============
+            Future<void> syncDevicePolicyFromWalletDoc(
+                Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
               ecoMode = (wData['eco_mode'] ?? false) == true;
               serverCreditBalanceYer = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
+              portableMb = ((wData['portable_mb'] ?? 0) as num).toDouble();
+              portableValueYer = ((wData['portable_value_yer'] ?? 0) as num).toDouble();
+              lifetimeConsumedMb = ((wData['lifetime_consumed_mb'] ?? 0) as num).toDouble();
               currentGbPriceYer = ((cfgData['gb_price_consumer_yer'] ?? 250) as num).toDouble();
               serverChunkSizeMb = ((cfgData['quota_chunk_mb'] ?? 100) as num).toInt();
               serverRefillTriggerMb = ((cfgData['quota_refill_trigger_mb'] ?? 80) as num).toInt();
+              cachedDnsPrimary = (cfgData['dns_primary'] ?? '94.140.14.14').toString();
+              cachedDnsFallback = (cfgData['dns_secondary'] ?? '94.140.15.15').toString();
 
               final bool locked = (wData['parental_locked'] ?? false) == true;
               final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
@@ -1008,7 +1383,9 @@ jobs:
                 if (list != null) compiledDomains.addAll(list);
               }
               for (final d in customDoms) {
-                if (d.toString().trim().isNotEmpty) compiledDomains.add(d.toString().trim().toLowerCase());
+                if (d.toString().trim().isNotEmpty) {
+                  compiledDomains.add(d.toString().trim().toLowerCase());
+                }
               }
 
               try {
@@ -1023,7 +1400,9 @@ jobs:
               } catch (_) {}
             }
 
-            Future<bool> startSmartConnection(Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
+            // ============ START SMART CONNECTION ============
+            Future<bool> startSmartConnection(
+                Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
               if ((wData['parental_locked'] ?? false) == true) {
                 throw Exception("تم إيقاف الاستخدام مؤقتاً من المشرف العائلي");
               }
@@ -1033,37 +1412,64 @@ jobs:
                 throw Exception("انتهى وقت الاستخدام اليومي المخصص لهذا الجهاز");
               }
 
-              final hostCheck = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
+              // 1) ✅ التحقق الفيزيائي الإلزامي
+              final hostCheck = await verifyManualHostActivation(
+                  currentHostId, requirePhysicalRouter: true);
               if (hostCheck['ok'] != true) {
-                throw Exception(hostCheck['reason'] ?? "لا يمكن تشغيل النفق إلا على شبكة مفعلة");
+                throw Exception(hostCheck['reason'] ?? "الشبكة غير معتمدة");
               }
 
+              // 2) مزامنة السياسات
               await syncDevicePolicyFromWalletDoc(wData, cfgData);
 
-              if ((activeChunkTotalBytes - activeChunkConsumedBytes) <= 512 * 1024) {
-                await purchaseQuotaChunkFromServer();
+              // 3) شراء دفعة إذا كان الرصيد العائم منخفضاً
+              final currentPortable = ((wData['portable_mb'] ?? 0) as num).toDouble();
+              if (currentPortable < 5.0) {
+                await purchasePortableQuota();
               }
 
+              // 4) بدء الجلسة
+              final sessionResult = await startSession();
+              if (sessionResult['ok'] != true) {
+                throw Exception(sessionResult['reason'] ?? "فشل بدء الجلسة");
+              }
+
+              // 5) فتح النفق مع DNS ديناميكي
               final ok = await _vpnChannel.invokeMethod<bool>('startVpn', {
                 'ecoMode': ecoMode,
+                'dnsPrimary': cachedDnsPrimary,
+                'dnsFallback': cachedDnsFallback,
               });
               isVpnActive = ok ?? false;
               if (isVpnActive) {
-                await _knockMikroTikGateway(unlock: true);
+                await _knockMikroTikGateway(unlock: true, gateway: cachedGatewayIp);
                 _startRealtimeFuelPumpLoop();
               }
               notifyListeners();
               return isVpnActive;
             }
 
+            // ============ STOP SMART CONNECTION ============
             Future<void> stopSmartConnection() async {
               _fuelPumpTimer?.cancel();
               _fuelPumpTimer = null;
-              _mikrotikKeepAliveTimer?.cancel();
-              _mikrotikKeepAliveTimer = null;
+              _networkCheckTimer?.cancel();
+              _networkCheckTimer = null;
               liveSpeedKbps = 0.0;
+
+              // إرسال أي استهلاك متبقٍ قبل الإغلاق
+              if (_pendingMbReport >= 0.1 && currentSessionId.isNotEmpty) {
+                try {
+                  await reportConsumption(_pendingMbReport, trigger: 'session_close');
+                } catch (_) {}
+              }
+
               await persistQuotaState();
-              await _knockMikroTikGateway(unlock: false);
+              await _knockMikroTikGateway(unlock: false, gateway: cachedGatewayIp);
+
+              // إغلاق الجلسة في السيرفر
+              await closeSession(reason: 'user_stop');
+
               try {
                 await _vpnChannel.invokeMethod('stopVpn');
               } catch (_) {}
@@ -1071,19 +1477,29 @@ jobs:
               notifyListeners();
             }
 
+            // ============ FUEL PUMP LOOP ============
             void _startRealtimeFuelPumpLoop() {
               _fuelPumpTimer?.cancel();
-              _mikrotikKeepAliveTimer?.cancel();
+              _networkCheckTimer?.cancel();
               _ticksCounter = 0;
+              _ticksSinceReport = 0;
+              _ticksSinceHeartbeat = 0;
 
-              _mikrotikKeepAliveTimer = Timer.periodic(const Duration(seconds: 45), (_) async {
+              // فحص الشبكة كل 60 ثانية
+              _networkCheckTimer = Timer.periodic(const Duration(seconds: 60), (_) async {
                 if (!isVpnActive) return;
-                final check = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
-                if (check['ok'] != true) {
+                final currentGw = await _vpnChannel.invokeMethod<String>('getCurrentGatewayIp') ?? '';
+                if (currentGw.isNotEmpty && currentGw != cachedGatewayIp) {
+                  // تغيّرت الشبكة → أغلق النفق
                   await stopSmartConnection();
                   return;
                 }
-                await _knockMikroTikGateway(unlock: true);
+                // أعد التحقق من صلاحية الشبكة
+                final check = await verifyManualHostActivation(
+                    currentHostId, requirePhysicalRouter: true);
+                if (check['ok'] != true) {
+                  await stopSmartConnection();
+                }
               });
 
               _fuelPumpTimer = Timer.periodic(const Duration(milliseconds: 250), (_) async {
@@ -1091,9 +1507,12 @@ jobs:
                 try {
                   final int deltaBytes = await _vpnChannel.invokeMethod<int>('pollRealtimeDeltaBytes') ?? 0;
                   _ticksCounter++;
+                  _ticksSinceReport++;
+                  _ticksSinceHeartbeat++;
 
                   if (deltaBytes > 0) {
                     activeChunkConsumedBytes += deltaBytes;
+                    _pendingMbReport += deltaBytes / (1024.0 * 1024.0);
                     liveSpeedKbps = (deltaBytes * 4.0) / 1024.0;
                     if (activeChunkConsumedBytes > activeChunkTotalBytes) {
                       activeChunkConsumedBytes = activeChunkTotalBytes;
@@ -1103,16 +1522,31 @@ jobs:
                     liveSpeedKbps = 0.0;
                   }
 
+                  // حفظ محلي كل 2 ثانية
                   if (_ticksCounter % 8 == 0) {
                     await persistQuotaState();
                   }
 
+                  // heartbeat كل 30 ثانية (120 ticks × 250ms)
+                  if (_ticksSinceHeartbeat >= 120) {
+                    await sendHeartbeat();
+                    _ticksSinceHeartbeat = 0;
+                  }
+
+                  // تقرير كل 5MB أو 30 ثانية
+                  if (_pendingMbReport >= 5.0 || _ticksSinceReport >= 120) {
+                    if (_pendingMbReport >= 0.1) {
+                      await reportConsumption(_pendingMbReport, trigger: 'periodic');
+                    }
+                  }
+
+                  // شراء تلقائي قبل الفراغ
                   final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
                   final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
 
                   if (remainingBytes <= lowMarkBytes && !isPurchasingChunk && serverCreditBalanceYer > 0) {
                     try {
-                      await purchaseQuotaChunkFromServer();
+                      await purchasePortableQuota();
                     } catch (_) {}
                   }
 
@@ -1123,31 +1557,25 @@ jobs:
               });
             }
 
+            // ============ SIMULATE (DEV) ============
             Future<void> simulateFastFuelConsumption(int megabytesToConsume) async {
               if (!isVpnActive) {
-                throw Exception("شغّل النفق أولاً لترى عداد البنزين يتحرك بالفاصلة العشرية!");
+                throw Exception("شغّل النفق أولاً لترى عداد البنزين يتحرك");
               }
               final int stepBytes = (megabytesToConsume * 1024 * 1024) ~/ 10;
               for (int i = 0; i < 10; i++) {
                 await Future.delayed(const Duration(milliseconds: 80));
                 activeChunkConsumedBytes += stepBytes;
+                _pendingMbReport += stepBytes / (1024.0 * 1024.0);
                 if (activeChunkConsumedBytes > activeChunkTotalBytes) {
                   activeChunkConsumedBytes = activeChunkTotalBytes;
                 }
                 notifyListeners();
               }
               await persistQuotaState();
-
-              final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
-              final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
-              if (remainingBytes <= lowMarkBytes && !isPurchasingChunk && serverCreditBalanceYer > 0) {
-                await purchaseQuotaChunkFromServer();
-              }
-              if (activeChunkTotalBytes - activeChunkConsumedBytes <= 0) {
-                await stopSmartConnection();
-              }
             }
 
+            // ============ ECO MODE ============
             Future<void> toggleMyEcoMode(bool enabled) async {
               ecoMode = enabled;
               await FirebaseFirestore.instance.collection('wallets').doc(walletId).update({
@@ -1155,6 +1583,7 @@ jobs:
               });
             }
 
+            // ============ FAMILY LINK ============
             Future<void> linkFamilyMemberDevice(String childWalletId, String localNickname) async {
               final cleanId = childWalletId.replaceAll('LINK:', '').trim();
               if (cleanId.isEmpty || cleanId == walletId) {
@@ -1177,6 +1606,7 @@ jobs:
               }
             }
 
+            // ============ UNIFIED TRANSFER ============
             Future<Map<String, dynamic>> executeUnifiedTransfer({
               required String receiverId,
               required int amountYer,
@@ -1243,7 +1673,7 @@ jobs:
                 if (transferMode == 'cash') {
                   if (sCash < amountYer) throw Exception("الرصيد النقدي غير كافٍ");
                   if (rCash + rCredit + amountYer > receiverMaxHolding) {
-                    throw Exception("حساب المستلم سيتجاوز السقف المسموح له ($receiverMaxHolding ريال)");
+                    throw Exception("حساب المستلم سيتجاوز السقف ($receiverMaxHolding ريال)");
                   }
                   tx.update(senderRef, {
                     'cash_balance_yer': sCash - amountYer,
@@ -1267,7 +1697,7 @@ jobs:
                   if (walletId == cleanReceiver) {
                     final int newTotal = (sCash - netCashDeductedFromSender) + rCredit + finalCreditAddedToReceiver;
                     if (newTotal > receiverMaxHolding) {
-                      throw Exception("إجمالي الحساب سيتجاوز السقف المسموح ($receiverMaxHolding ريال)");
+                      throw Exception("إجمالي الحساب سيتجاوز السقف ($receiverMaxHolding ريال)");
                     }
                     tx.update(senderRef, {
                       'cash_balance_yer': sCash - netCashDeductedFromSender,
@@ -1277,7 +1707,7 @@ jobs:
                     });
                   } else {
                     if (rCash + rCredit + finalCreditAddedToReceiver > receiverMaxHolding) {
-                      throw Exception("حساب المستلم سيتجاوز السقف المسموح ($receiverMaxHolding ريال)");
+                      throw Exception("حساب المستلم سيتجاوز السقف ($receiverMaxHolding ريال)");
                     }
                     tx.update(senderRef, {
                       'cash_balance_yer': sCash - netCashDeductedFromSender,
@@ -1293,6 +1723,7 @@ jobs:
 
                 final txDoc = db.collection('transactions').doc();
                 tx.set(txDoc, {
+                  'type': transferMode == 'cash' ? 'cash_transfer' : 'credit_transfer',
                   'sender_id': walletId,
                   'receiver_id': cleanReceiver,
                   'transfer_mode': transferMode,
@@ -1325,8 +1756,8 @@ jobs:
             }
           }'''
           write_clean("lib/smart_client_core.dart", core_code)
-          print("PART2_DONE_CORE_DART_READY")
-          main_code = '''import 'package:flutter/material.dart';
+          print("PART3_DONE_CORE_DART_FULL")
+		  main_code = '''import 'package:flutter/material.dart';
           import 'package:firebase_core/firebase_core.dart';
           import 'package:firebase_auth/firebase_auth.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
@@ -1336,11 +1767,15 @@ jobs:
 
           const Color kMandarinOrange = Color(0xFFFF8C00);
           const Color kMandarinDark = Color(0xFFE67E00);
+          const Color kMandarinLight = Color(0xFFFFB84D);
           const Color kWhite = Colors.white;
           const Color kBlack = Colors.black;
           const Color kLightGray = Color(0xFFF5F5F5);
           const Color kMidGray = Color(0xFFE0E0E0);
           const Color kSoftGray = Color(0xFF757575);
+          const Color kSuccess = Color(0xFF10B981);
+          const Color kDanger = Color(0xFFDC2626);
+          const Color kWarning = Color(0xFFF59E0B);
 
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
@@ -1359,6 +1794,7 @@ jobs:
                   useMaterial3: true,
                   scaffoldBackgroundColor: kWhite,
                   primaryColor: kMandarinOrange,
+                  fontFamily: 'Tajawal',
                   colorScheme: const ColorScheme.light(
                     primary: kMandarinOrange,
                     secondary: kMandarinDark,
@@ -1366,17 +1802,33 @@ jobs:
                     onSecondary: kWhite,
                     surface: kWhite,
                     onSurface: kBlack,
+                    error: kDanger,
                   ),
                   appBarTheme: const AppBarTheme(
                     backgroundColor: kMandarinOrange,
                     foregroundColor: kBlack,
                     elevation: 0,
-                    titleTextStyle: TextStyle(color: kBlack, fontSize: 17, fontWeight: FontWeight.bold),
+                    centerTitle: false,
+                    titleTextStyle: TextStyle(
+                      color: kBlack,
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      fontFamily: 'Tajawal',
+                    ),
                   ),
                   elevatedButtonTheme: ElevatedButtonThemeData(
                     style: ElevatedButton.styleFrom(
                       backgroundColor: kMandarinOrange,
                       foregroundColor: kBlack,
+                      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      textStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                    ),
+                  ),
+                  outlinedButtonTheme: OutlinedButtonThemeData(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: kMandarinOrange,
+                      side: const BorderSide(color: kMandarinOrange, width: 2),
                       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
@@ -1386,6 +1838,7 @@ jobs:
                     fillColor: kLightGray,
                     labelStyle: const TextStyle(color: kBlack),
                     hintStyle: const TextStyle(color: kSoftGray),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
                       borderSide: const BorderSide(color: kMidGray),
@@ -1402,6 +1855,13 @@ jobs:
                   textTheme: const TextTheme(
                     bodyMedium: TextStyle(color: kBlack),
                     bodySmall: TextStyle(color: kBlack),
+                  ),
+                  navigationBarTheme: NavigationBarThemeData(
+                    backgroundColor: kWhite,
+                    indicatorColor: kMandarinOrange.withOpacity(0.25),
+                    labelTextStyle: WidgetStateProperty.all(
+                      const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: kBlack),
+                    ),
                   ),
                 ),
                 home: const Directionality(
@@ -1452,12 +1912,23 @@ jobs:
                     await Firebase.initializeApp().timeout(const Duration(seconds: 15));
                   }
                 }
+
                 try {
                   if (FirebaseAuth.instance.currentUser == null) {
-                    await FirebaseAuth.instance.signInAnonymously().timeout(const Duration(seconds: 8));
+                    await FirebaseAuth.instance.signInAnonymously()
+                        .timeout(const Duration(seconds: 8));
                   }
                 } catch (_) {}
+
+                // تسجيل/استرجاع المحفظة (يتضمن التحقق الفيزيائي)
                 await _engine.registerOrRecoverDeviceWallet();
+
+                // كشف التلاعب من الجلسة السابقة
+                await _engine.detectTamperOnBoot();
+
+                // تحميل الحالة المحفوظة
+                await _engine.loadSavedQuotaState();
+
                 if (mounted) setState(() => _isReady = true);
               } catch (e) {
                 if (mounted) setState(() => _errorMsg = e.toString());
@@ -1468,21 +1939,47 @@ jobs:
             Widget build(BuildContext context) {
               if (_errorMsg != null) {
                 return Scaffold(
+                  backgroundColor: kWhite,
                   body: Center(
                     child: Padding(
                       padding: const EdgeInsets.all(24),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.error_outline, color: kMandarinOrange, size: 54),
-                          const SizedBox(height: 14),
-                          const Text("تنبيه التفعيل", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: kBlack)),
-                          const SizedBox(height: 8),
-                          Text(_errorMsg!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: kSoftGray)),
+                          Container(
+                            padding: const EdgeInsets.all(20),
+                            decoration: BoxDecoration(
+                              color: kDanger.withOpacity(0.1),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.error_outline, color: kDanger, size: 54),
+                          ),
                           const SizedBox(height: 20),
-                          ElevatedButton(
-                            onPressed: () { setState(() => _errorMsg = null); _initSystem(); },
-                            child: const Text("إعادة المحاولة", style: TextStyle(fontWeight: FontWeight.bold)),
+                          const Text("تنبيه التفعيل",
+                              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: kBlack)),
+                          const SizedBox(height: 12),
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: kLightGray,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: kMidGray),
+                            ),
+                            child: Text(_errorMsg!,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(fontSize: 13, color: kBlack, height: 1.6)),
+                          ),
+                          const SizedBox(height: 24),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              icon: const Icon(Icons.refresh, color: kBlack),
+                              label: const Text("إعادة المحاولة"),
+                              onPressed: () {
+                                setState(() => _errorMsg = null);
+                                _initSystem();
+                              },
+                            ),
                           ),
                         ],
                       ),
@@ -1490,20 +1987,33 @@ jobs:
                   ),
                 );
               }
+
               if (!_isReady) {
                 return const Scaffold(
+                  backgroundColor: kWhite,
                   body: Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        CircularProgressIndicator(color: kMandarinOrange),
-                        SizedBox(height: 16),
-                        Text("جاري فتح الحساب والتحقق من الشبكة...", style: TextStyle(fontSize: 15, color: kBlack)),
+                        SizedBox(
+                          width: 60, height: 60,
+                          child: CircularProgressIndicator(
+                            color: kMandarinOrange,
+                            strokeWidth: 4,
+                          ),
+                        ),
+                        SizedBox(height: 20),
+                        Text("جاري فتح الحساب والتحقق من الشبكة...",
+                            style: TextStyle(fontSize: 15, color: kBlack, fontWeight: FontWeight.bold)),
+                        SizedBox(height: 8),
+                        Text("يتحقق من بوابة الميكروتيك...",
+                            style: TextStyle(fontSize: 12, color: kSoftGray)),
                       ],
                     ),
                   ),
                 );
               }
+
               return MainCommercialShell(engine: _engine);
             }
           }
@@ -1544,7 +2054,9 @@ jobs:
                 context: context,
                 backgroundColor: kWhite,
                 isScrollControlled: true,
-                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
                 builder: (ctx) => _QrScannerSheet(title: title, manualCtrl: manualCtrl),
               );
             }
@@ -1577,15 +2089,43 @@ jobs:
                           final bool ecoMode = (w['eco_mode'] ?? false) == true;
                           final bool kyc = (w['kyc_verified'] ?? false) == true;
                           final String fullName = (w['full_name'] ?? '').toString().trim();
-                          final List<dynamic> linkedChildren = (w['linked_children'] as List<dynamic>?) ?? [];
+                          final List<dynamic> linkedChildren =
+                              (w['linked_children'] as List<dynamic>?) ?? [];
 
                           return Scaffold(
+                            backgroundColor: kWhite,
                             appBar: AppBar(
-                              title: Text(
-                                fullName.isNotEmpty ? "$fullName (#$myId)" : "حساب رقم #$myId",
-                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: kBlack),
+                              title: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    fullName.isNotEmpty ? fullName : "حساب #$myId",
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: kBlack),
+                                  ),
+                                  if (fullName.isNotEmpty)
+                                    Text("#$myId",
+                                        style: const TextStyle(fontSize: 11, color: kBlack, fontWeight: FontWeight.normal)),
+                                ],
                               ),
                               actions: [
+                                if (widget.engine.isVpnActive)
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(vertical: 12, horizontal: 6),
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: kSuccess,
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.circle, color: kWhite, size: 8),
+                                        SizedBox(width: 4),
+                                        Text("نشط",
+                                            style: TextStyle(color: kWhite, fontSize: 11, fontWeight: FontWeight.bold)),
+                                      ],
+                                    ),
+                                  ),
                                 IconButton(
                                   icon: const Icon(Icons.qr_code_2, color: kBlack),
                                   onPressed: () => _showMyQrSheet(myId),
@@ -1600,13 +2140,20 @@ jobs:
                                     margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                                     padding: const EdgeInsets.all(12),
                                     decoration: BoxDecoration(
-                                      color: kMandarinOrange.withOpacity(0.15),
+                                      color: _feedback.startsWith("⚠️")
+                                          ? kDanger.withOpacity(0.1)
+                                          : kSuccess.withOpacity(0.1),
                                       borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(color: kMandarinOrange, width: 1),
+                                      border: Border.all(
+                                        color: _feedback.startsWith("⚠️") ? kDanger : kSuccess,
+                                      ),
                                     ),
                                     child: Row(
                                       children: [
-                                        Expanded(child: Text(_feedback, style: const TextStyle(fontSize: 13, color: kBlack))),
+                                        Expanded(
+                                          child: Text(_feedback,
+                                              style: const TextStyle(fontSize: 13, color: kBlack, height: 1.4)),
+                                        ),
                                         IconButton(
                                           icon: const Icon(Icons.close, size: 18, color: kBlack),
                                           onPressed: () => setState(() => _feedback = ""),
@@ -1618,25 +2165,39 @@ jobs:
                                   child: IndexedStack(
                                     index: _currentTab,
                                     children: [
-                                      _buildBalanceAndTransferTab(myId, cashBal, kyc),
+                                      _buildBalanceAndTransferTab(myId, cashBal, kyc, w, cfg),
                                       _buildFuelPumpTunnelTab(w, cfg, ecoMode),
                                       _buildParentalControlTab(myId, linkedChildren),
-                                      _buildContactsAndHostWalletTab(myId),
+                                      _buildContactsAndHostWalletTab(myId, w),
                                     ],
                                   ),
                                 ),
                               ],
                             ),
                             bottomNavigationBar: NavigationBar(
-                              backgroundColor: kWhite,
-                              indicatorColor: kMandarinOrange.withOpacity(0.3),
                               selectedIndex: _currentTab,
                               onDestinationSelected: (idx) => setState(() => _currentTab = idx),
                               destinations: const [
-                                NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined, color: kBlack), selectedIcon: Icon(Icons.account_balance_wallet, color: kMandarinOrange), label: 'الرصيد'),
-                                NavigationDestination(icon: Icon(Icons.local_gas_station_outlined, color: kBlack), selectedIcon: Icon(Icons.local_gas_station, color: kMandarinOrange), label: 'النفق'),
-                                NavigationDestination(icon: Icon(Icons.family_restroom_outlined, color: kBlack), selectedIcon: Icon(Icons.family_restroom, color: kMandarinOrange), label: 'التحكم'),
-                                NavigationDestination(icon: Icon(Icons.manage_accounts_outlined, color: kBlack), selectedIcon: Icon(Icons.manage_accounts, color: kMandarinOrange), label: 'الإدارة'),
+                                NavigationDestination(
+                                  icon: Icon(Icons.account_balance_wallet_outlined, color: kBlack),
+                                  selectedIcon: Icon(Icons.account_balance_wallet, color: kMandarinOrange),
+                                  label: 'الرصيد',
+                                ),
+                                NavigationDestination(
+                                  icon: Icon(Icons.local_gas_station_outlined, color: kBlack),
+                                  selectedIcon: Icon(Icons.local_gas_station, color: kMandarinOrange),
+                                  label: 'النفق',
+                                ),
+                                NavigationDestination(
+                                  icon: Icon(Icons.family_restroom_outlined, color: kBlack),
+                                  selectedIcon: Icon(Icons.family_restroom, color: kMandarinOrange),
+                                  label: 'التحكم',
+                                ),
+                                NavigationDestination(
+                                  icon: Icon(Icons.manage_accounts_outlined, color: kBlack),
+                                  selectedIcon: Icon(Icons.manage_accounts, color: kMandarinOrange),
+                                  label: 'الإدارة',
+                                ),
                               ],
                             ),
                           );
@@ -1648,88 +2209,162 @@ jobs:
               );
             }
 
-            Widget _buildBalanceAndTransferTab(String myId, int cashBal, bool kyc) {
+            // ============ TAB 1: BALANCE & TRANSFER ============
+            Widget _buildBalanceAndTransferTab(
+                String myId, int cashBal, bool kyc, Map<String, dynamic> w, Map<String, dynamic> cfg) {
               final filteredContacts = _localContacts.entries.where((e) {
                 if (_searchQuery.trim().isEmpty) return true;
                 return e.value.contains(_searchQuery) || e.key.contains(_searchQuery);
               }).toList();
 
               final double liveCredit = widget.engine.fuelPumpRealtimeBalanceYer;
+              final double portableMb = widget.engine.portableMb;
+              final double portableValue = widget.engine.portableValueYer;
+              final double lifetime = widget.engine.lifetimeConsumedMb;
+              final bool hasSession = widget.engine.currentSessionId.isNotEmpty;
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Header card
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
-                        gradient: const LinearGradient(colors: [kMandarinOrange, kMandarinDark]),
+                        gradient: const LinearGradient(
+                          colors: [kMandarinOrange, kMandarinDark],
+                          begin: Alignment.topRight,
+                          end: Alignment.bottomLeft,
+                        ),
                         borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text("الرصيد النقدي", style: TextStyle(fontSize: 12, color: kBlack)),
-                                const SizedBox(height: 4),
-                                Text("$cashBal ريال", style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: kBlack)),
-                              ],
-                            ),
-                          ),
-                          Container(width: 1, height: 48, color: kBlack.withOpacity(0.3)),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text("رصيد الاستخدام", style: TextStyle(fontSize: 12, color: kBlack)),
-                                const SizedBox(height: 4),
-                                Text(
-                                  "${liveCredit.toStringAsFixed(3)} ريال",
-                                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: kBlack, fontFamily: 'monospace'),
-                                ),
-                              ],
-                            ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: kMandarinOrange.withOpacity(0.3),
+                            blurRadius: 12,
+                            offset: const Offset(0, 6),
                           ),
                         ],
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
                       child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          const Text("تحويل الرصيد", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: kBlack)),
-                          const SizedBox(height: 12),
                           Row(
                             children: [
                               Expanded(
-                                child: ChoiceChip(
-                                  label: const Text("نقدي (0%)", style: TextStyle(color: kBlack, fontSize: 12)),
-                                  selected: _transferMode == 'cash',
-                                  selectedColor: kMandarinOrange,
-                                  backgroundColor: kWhite,
-                                  onSelected: (_) => setState(() => _transferMode = 'cash'),
+                                child: _headerStat(
+                                  label: "الرصيد النقدي",
+                                  value: "$cashBal",
+                                  unit: "ريال",
+                                  icon: Icons.payments,
                                 ),
                               ),
-                              const SizedBox(width: 8),
+                              Container(width: 1, height: 60, color: kBlack.withOpacity(0.2)),
                               Expanded(
-                                child: ChoiceChip(
-                                  label: const Text("رصيد استخدام", style: TextStyle(color: kBlack, fontSize: 12)),
-                                  selected: _transferMode == 'credit',
-                                  selectedColor: kMandarinOrange,
-                                  backgroundColor: kWhite,
-                                  onSelected: (_) => setState(() => _transferMode = 'credit'),
+                                child: _headerStat(
+                                  label: "رصيد الاستخدام",
+                                  value: liveCredit.toStringAsFixed(2),
+                                  unit: "ريال",
+                                  icon: Icons.data_usage,
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 14),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: kBlack.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(Icons.cloud_download, color: kBlack, size: 16),
+                                    const SizedBox(width: 6),
+                                    Text("عائم: ${portableMb.toStringAsFixed(1)} MB",
+                                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack)),
+                                  ],
+                                ),
+                                Row(
+                                  children: [
+                                    const Icon(Icons.history, color: kBlack, size: 16),
+                                    const SizedBox(width: 6),
+                                    Text("تراكمي: ${lifetime.toStringAsFixed(0)} MB",
+                                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack)),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (hasSession)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: kSuccess,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.play_circle, color: kWhite, size: 14),
+                                    SizedBox(width: 4),
+                                    Text("جلسة نشطة",
+                                        style: TextStyle(color: kWhite, fontSize: 11, fontWeight: FontWeight.bold)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Transfer section
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: kWhite,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: kMandarinOrange, width: 2),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.swap_horiz, color: kMandarinOrange, size: 22),
+                              SizedBox(width: 8),
+                              Text("تحويل الرصيد",
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: kBlack)),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: _modeChip(
+                                  label: "نقدي (0%)",
+                                  icon: Icons.payments,
+                                  selected: _transferMode == 'cash',
+                                  onTap: () => setState(() => _transferMode = 'cash'),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: _modeChip(
+                                  label: "تغذية رصيد",
+                                  icon: Icons.bolt,
+                                  selected: _transferMode == 'credit',
+                                  onTap: () => setState(() => _transferMode = 'credit'),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
                           Row(
                             children: [
                               Expanded(
@@ -1739,38 +2374,60 @@ jobs:
                                   style: const TextStyle(color: kBlack),
                                   decoration: InputDecoration(
                                     labelText: "رقم المستلم",
+                                    prefixIcon: const Icon(Icons.person, color: kMandarinOrange),
                                     helperText: _localContacts[_receiverCtrl.text.trim()] != null
                                         ? "الاسم: ${_localContacts[_receiverCtrl.text.trim()]}"
                                         : null,
+                                    helperStyle: const TextStyle(color: kSuccess, fontWeight: FontWeight.bold),
                                   ),
                                   onChanged: (_) => setState(() {}),
                                 ),
                               ),
                               const SizedBox(width: 8),
-                              IconButton.filled(
-                                style: IconButton.styleFrom(backgroundColor: kMandarinOrange, foregroundColor: kBlack),
-                                icon: const Icon(Icons.qr_code_scanner),
-                                onPressed: () async {
-                                  final code = await _openQrScannerModal("مسح رمز التحويل");
-                                  if (code != null && code.isNotEmpty) {
-                                    setState(() => _receiverCtrl.text = code.replaceAll('LINK:', '').trim());
-                                  }
-                                },
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: kMandarinOrange,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: IconButton(
+                                  icon: const Icon(Icons.qr_code_scanner, color: kBlack),
+                                  onPressed: () async {
+                                    final code = await _openQrScannerModal("مسح رمز التحويل");
+                                    if (code != null && code.isNotEmpty) {
+                                      setState(() => _receiverCtrl.text = code.replaceAll('LINK:', '').trim());
+                                    }
+                                  },
+                                ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 10),
+                          const SizedBox(height: 12),
                           TextField(
                             controller: _amountCtrl,
                             keyboardType: TextInputType.number,
-                            style: const TextStyle(color: kBlack),
-                            decoration: const InputDecoration(labelText: "المبلغ بالريال"),
+                            style: const TextStyle(color: kBlack, fontSize: 16, fontWeight: FontWeight.bold),
+                            decoration: const InputDecoration(
+                              labelText: "المبلغ بالريال",
+                              prefixIcon: Icon(Icons.attach_money, color: kMandarinOrange),
+                            ),
                           ),
-                          const SizedBox(height: 12),
-                          ElevatedButton(
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            icon: Icon(
+                              _transferMode == 'cash' ? Icons.send : Icons.bolt,
+                              color: kBlack,
+                            ),
+                            label: Text(
+                              _transferMode == 'cash' ? "تحويل نقدي" : "تغذية رصيد الاستخدام",
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack),
+                            ),
                             onPressed: () async {
                               try {
                                 final amt = int.tryParse(_amountCtrl.text.trim()) ?? 0;
+                                if (amt <= 0) {
+                                  setState(() => _feedback = "⚠️ أدخل مبلغاً صحيحاً");
+                                  return;
+                                }
                                 final res = await widget.engine.executeUnifiedTransfer(
                                   receiverId: _receiverCtrl.text.trim(),
                                   amountYer: amt,
@@ -1781,54 +2438,76 @@ jobs:
                                   if (_transferMode == 'cash') {
                                     _feedback = "✅ تم تحويل $amt ريال نقدي";
                                   } else {
-                                    _feedback = "✅ خُصم ${res['net_deducted']} وأُضيف ${res['credit_delivered']} رصيد استخدام";
+                                    _feedback = "✅ خُصم ${res['net_deducted']} ريال وأُضيف ${res['credit_delivered']} رصيد استخدام";
                                   }
                                 });
                               } catch (e) {
                                 setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                               }
                             },
-                            child: const Text("تنفيذ العملية", style: TextStyle(fontWeight: FontWeight.bold)),
                           ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 16),
+
+                    // Quick contacts
                     Container(
                       padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
+                      decoration: BoxDecoration(
+                        color: kLightGray,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: kMidGray),
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          const Text("قائمة التحويل السريع", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                          const Row(
+                            children: [
+                              Icon(Icons.contacts, color: kMandarinOrange, size: 22),
+                              SizedBox(width: 8),
+                              Text("التحويل السريع",
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                            ],
+                          ),
                           const SizedBox(height: 10),
                           TextField(
                             controller: _searchContactCtrl,
                             style: const TextStyle(color: kBlack),
                             decoration: const InputDecoration(
                               hintText: "ابحث بالاسم أو الرقم...",
-                              prefixIcon: Icon(Icons.search, color: kBlack),
+                              prefixIcon: Icon(Icons.search, color: kMandarinOrange),
                             ),
                             onChanged: (v) => setState(() => _searchQuery = v),
                           ),
                           const SizedBox(height: 8),
                           if (filteredContacts.isEmpty)
                             const Padding(
-                              padding: EdgeInsets.all(12.0),
-                              child: Text("لا توجد جهات مطابقة.", style: TextStyle(fontSize: 12, color: kSoftGray)),
+                              padding: EdgeInsets.all(16.0),
+                              child: Text("لا توجد جهات محفوظة",
+                                  style: TextStyle(fontSize: 13, color: kSoftGray),
+                                  textAlign: TextAlign.center),
                             ),
-                          for (final entry in filteredContacts)
-                            ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: const CircleAvatar(backgroundColor: kMandarinOrange, child: Icon(Icons.person, color: kBlack)),
-                              title: Text(entry.value, style: const TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
-                              subtitle: Text("حساب #${entry.key}", style: const TextStyle(color: kSoftGray)),
-                              trailing: ElevatedButton(
-                                style: ElevatedButton.styleFrom(backgroundColor: kMandarinOrange, foregroundColor: kBlack),
-                                onPressed: () => setState(() => _receiverCtrl.text = entry.key),
-                                child: const Text("اختيار"),
-                              ),
-                            ),
+                          ...filteredContacts.map((entry) => ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: CircleAvatar(
+                                  backgroundColor: kMandarinOrange,
+                                  child: const Icon(Icons.person, color: kBlack),
+                                ),
+                                title: Text(entry.value,
+                                    style: const TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
+                                subtitle: Text("حساب #${entry.key}",
+                                    style: const TextStyle(color: kSoftGray, fontSize: 11)),
+                                trailing: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: kMandarinOrange,
+                                    foregroundColor: kBlack,
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                  ),
+                                  onPressed: () => setState(() => _receiverCtrl.text = entry.key),
+                                  child: const Text("اختيار", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                                ),
+                              )),
                         ],
                       ),
                     ),
@@ -1837,13 +2516,77 @@ jobs:
               );
             }
 
-            Widget _buildFuelPumpTunnelTab(Map<String, dynamic> w, Map<String, dynamic> cfg, bool ecoMode) {
+            Widget _headerStat({
+              required String label,
+              required String value,
+              required String unit,
+              required IconData icon,
+            }) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Icon(icon, color: kBlack, size: 20),
+                  const SizedBox(height: 4),
+                  Text(label,
+                      style: const TextStyle(fontSize: 11, color: kBlack, fontWeight: FontWeight.w500)),
+                  const SizedBox(height: 2),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text(value,
+                          style: const TextStyle(
+                              fontSize: 22, fontWeight: FontWeight.w900, color: kBlack, fontFamily: 'monospace')),
+                      const SizedBox(width: 3),
+                      Text(unit, style: const TextStyle(fontSize: 11, color: kBlack, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ],
+              );
+            }
+
+            Widget _modeChip({
+              required String label,
+              required IconData icon,
+              required bool selected,
+              required VoidCallback onTap,
+            }) {
+              return GestureDetector(
+                onTap: onTap,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                  decoration: BoxDecoration(
+                    color: selected ? kMandarinOrange : kWhite,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: selected ? kMandarinOrange : kMidGray, width: 2),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(icon, color: kBlack, size: 16),
+                      const SizedBox(width: 6),
+                      Text(label,
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack)),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            // ============ TAB 2: FUEL PUMP TUNNEL ============
+            Widget _buildFuelPumpTunnelTab(
+                Map<String, dynamic> w, Map<String, dynamic> cfg, bool ecoMode) {
               final double liveBalanceYer = widget.engine.fuelPumpRealtimeBalanceYer;
               final double sessionSpentYer = widget.engine.currentSessionConsumedYer;
               final double remMb = widget.engine.remainingChunkMb;
               final double usedMb = widget.engine.consumedChunkMb;
+              final double portableMb = widget.engine.portableMb;
               final int chunkMaxMb = widget.engine.serverChunkSizeMb;
               final int triggerMb = widget.engine.serverRefillTriggerMb;
+              final bool isActive = widget.engine.isVpnActive;
+              final bool hasSession = widget.engine.currentSessionId.isNotEmpty;
+
               final double tankProgress = widget.engine.activeChunkTotalBytes > 0
                   ? (remMb / chunkMaxMb).clamp(0.0, 1.0)
                   : 0.0;
@@ -1853,103 +2596,195 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Fuel pump card
                     Container(
                       padding: const EdgeInsets.all(22),
                       decoration: BoxDecoration(
                         color: kWhite,
                         borderRadius: BorderRadius.circular(24),
                         border: Border.all(
-                          color: widget.engine.isVpnActive ? kMandarinOrange : kMidGray,
-                          width: 2,
+                          color: isActive ? kMandarinOrange : kMidGray,
+                          width: 3,
                         ),
+                        boxShadow: isActive
+                            ? [BoxShadow(color: kMandarinOrange.withOpacity(0.25), blurRadius: 16, offset: const Offset(0, 6))]
+                            : null,
                       ),
                       child: Column(
                         children: [
+                          // Status bar
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Row(
                                 children: [
-                                  Icon(Icons.local_gas_station, color: widget.engine.isVpnActive ? kMandarinOrange : kSoftGray),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    widget.engine.isVpnActive ? "العداد يعمل لحظياً" : "العداد متوقف",
-                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack),
+                                  Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      color: isActive ? kSuccess.withOpacity(0.15) : kLightGray,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      Icons.local_gas_station,
+                                      color: isActive ? kSuccess : kSoftGray,
+                                      size: 22,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        isActive ? "العداد يعمل" : "العداد متوقف",
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack),
+                                      ),
+                                      Text(
+                                        isActive ? "متصل بالشبكة" : "غير متصل",
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: isActive ? kSuccess : kSoftGray,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ],
                               ),
                               if (widget.engine.isPurchasingChunk)
-                                const SizedBox(
-                                  width: 18, height: 18,
-                                  child: CircularProgressIndicator(strokeWidth: 2, color: kMandarinOrange),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: kWarning.withOpacity(0.15),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      SizedBox(
+                                        width: 12, height: 12,
+                                        child: CircularProgressIndicator(strokeWidth: 2, color: kWarning),
+                                      ),
+                                      SizedBox(width: 6),
+                                      Text("جاري الشراء",
+                                          style: TextStyle(fontSize: 10, color: kBlack, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
                                 ),
                             ],
                           ),
-                          const SizedBox(height: 18),
-                          const Text("الرصيد المتبقي اللحظي", style: TextStyle(fontSize: 12, color: kSoftGray)),
-                          const SizedBox(height: 6),
+                          const SizedBox(height: 20),
+
+                          // Live balance
+                          const Text("الرصيد المتبقي اللحظي",
+                              style: TextStyle(fontSize: 12, color: kSoftGray, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 8),
                           Container(
-                            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
                             decoration: BoxDecoration(
-                              color: kLightGray,
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: kMandarinOrange, width: 1),
+                              gradient: LinearGradient(
+                                colors: isActive
+                                    ? [kMandarinOrange, kMandarinDark]
+                                    : [kLightGray, kMidGray],
+                              ),
+                              borderRadius: BorderRadius.circular(16),
                             ),
-                            child: Text(
-                              "${liveBalanceYer.toStringAsFixed(3)} ريال",
-                              style: const TextStyle(
-                                fontSize: 34, fontWeight: FontWeight.w900,
-                                fontFamily: 'monospace', color: kMandarinOrange, letterSpacing: 1.2,
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Text(
+                                "${liveBalanceYer.toStringAsFixed(3)}",
+                                style: TextStyle(
+                                  fontSize: 42,
+                                  fontWeight: FontWeight.w900,
+                                  fontFamily: 'monospace',
+                                  color: isActive ? kBlack : kSoftGray,
+                                  letterSpacing: 1.5,
+                                ),
                               ),
                             ),
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 4),
+                          const Text("ريال", style: TextStyle(fontSize: 12, color: kSoftGray, fontWeight: FontWeight.bold)),
+
+                          const SizedBox(height: 20),
+
+                          // Stats row
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
-                              Column(children: [
-                                const Text("صرف الدفعة", style: TextStyle(fontSize: 11, color: kSoftGray)),
-                                Text("${sessionSpentYer.toStringAsFixed(3)}", style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: kBlack, fontFamily: 'monospace')),
-                              ]),
-                              Column(children: [
-                                const Text("مستهلك", style: TextStyle(fontSize: 11, color: kSoftGray)),
-                                Text("${usedMb.toStringAsFixed(1)} MB", style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: kBlack, fontFamily: 'monospace')),
-                              ]),
-                              Column(children: [
-                                const Text("متبقي", style: TextStyle(fontSize: 11, color: kSoftGray)),
-                                Text("${remMb.toStringAsFixed(1)} MB", style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: kMandarinOrange, fontFamily: 'monospace')),
-                              ]),
+                              _statColumn(
+                                label: "صرف الجلسة",
+                                value: sessionSpentYer.toStringAsFixed(3),
+                                unit: "ريال",
+                                color: kBlack,
+                              ),
+                              Container(width: 1, height: 40, color: kMidGray),
+                              _statColumn(
+                                label: "مستهلك",
+                                value: usedMb.toStringAsFixed(1),
+                                unit: "MB",
+                                color: kBlack,
+                              ),
+                              Container(width: 1, height: 40, color: kMidGray),
+                              _statColumn(
+                                label: "متبقي بالخزان",
+                                value: remMb.toStringAsFixed(1),
+                                unit: "MB",
+                                color: kMandarinOrange,
+                              ),
                             ],
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 20),
+
+                          // Tank progress
                           ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(10),
                             child: LinearProgressIndicator(
                               value: tankProgress,
-                              minHeight: 10,
+                              minHeight: 14,
                               backgroundColor: kMidGray,
                               valueColor: AlwaysStoppedAnimation<Color>(
-                                remMb <= (chunkMaxMb - triggerMb) ? Colors.orange.shade700 : kMandarinOrange,
+                                remMb <= (chunkMaxMb - triggerMb) ? kWarning : kMandarinOrange,
                               ),
                             ),
                           ),
-                          const SizedBox(height: 6),
-                          Text(
-                            "حجم الدفعة: $chunkMaxMb MB | تجديد تلقائي عند $triggerMb MB",
-                            style: const TextStyle(fontSize: 11, color: kSoftGray),
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text("خزان: ${portableMb.toStringAsFixed(0)} MB",
+                                  style: const TextStyle(fontSize: 11, color: kBlack, fontWeight: FontWeight.bold)),
+                              Text("دفعة $chunkMaxMb MB | شراء عند $triggerMb MB",
+                                  style: const TextStyle(fontSize: 10, color: kSoftGray)),
+                            ],
                           ),
-                          const SizedBox(height: 20),
+                          const SizedBox(height: 22),
+
+                          // Action button
                           SizedBox(
                             width: double.infinity,
-                            child: ElevatedButton(
+                            height: 56,
+                            child: ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: widget.engine.isVpnActive ? Colors.red : kMandarinOrange,
-                                foregroundColor: widget.engine.isVpnActive ? kWhite : kBlack,
-                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                backgroundColor: isActive ? kDanger : kMandarinOrange,
+                                foregroundColor: isActive ? kWhite : kBlack,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              ),
+                              icon: Icon(isActive ? Icons.stop_circle : Icons.play_circle, size: 26),
+                              label: Text(
+                                isActive ? "إيقاف النفق" : "تشغيل النفق والعداد",
+                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                               ),
                               onPressed: () async {
                                 try {
-                                  if (!widget.engine.isVpnActive) {
+                                  if (!isActive) {
+                                    if (portableMb < 1.0) {
+                                      // لا يوجد رصيد عائم — اشترِ أولاً
+                                      if (widget.engine.serverCreditBalanceYer < 1) {
+                                        setState(() => _feedback = "⚠️ رصيد الاستخدام غير كافٍ. اشحن أولاً من الإدارة.");
+                                        return;
+                                      }
+                                      await widget.engine.purchasePortableQuota();
+                                    }
                                     await widget.engine.startSmartConnection(w, cfg);
                                     setState(() => _feedback = "✅ تم تشغيل النفق والعداد");
                                   } else {
@@ -1960,23 +2795,43 @@ jobs:
                                   setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                                 }
                               },
-                              child: Text(
-                                widget.engine.isVpnActive ? "إيقاف النفق" : "تشغيل النفق والعداد",
-                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                              ),
                             ),
                           ),
+                          if (hasSession)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Text(
+                                "رقم الجلسة: ${widget.engine.currentSessionId.substring(widget.engine.currentSessionId.length > 12 ? widget.engine.currentSessionId.length - 12 : 0)}",
+                                style: const TextStyle(fontSize: 10, color: kSoftGray, fontFamily: 'monospace'),
+                              ),
+                            ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 16),
+
+                    // Eco mode
                     Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: kLightGray,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: kMidGray),
+                      ),
                       child: SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text("الوضع الاقتصادي", style: TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
-                        subtitle: const Text("خفض جودة الفيديو لتوفير الرصيد", style: TextStyle(fontSize: 12, color: kSoftGray)),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        secondary: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: kSuccess.withOpacity(0.15),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.eco, color: kSuccess),
+                        ),
+                        title: const Text("الوضع الاقتصادي",
+                            style: TextStyle(fontWeight: FontWeight.bold, color: kBlack, fontSize: 14)),
+                        subtitle: const Text("يخفض جودة الفيديو لتوفير الرصيد",
+                            style: TextStyle(fontSize: 11, color: kSoftGray)),
                         value: ecoMode,
                         activeColor: kMandarinOrange,
                         onChanged: (val) async {
@@ -1990,6 +2845,24 @@ jobs:
               );
             }
 
+            Widget _statColumn({
+              required String label,
+              required String value,
+              required String unit,
+              required Color color,
+            }) {
+              return Column(
+                children: [
+                  Text(label, style: const TextStyle(fontSize: 10, color: kSoftGray, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Text(value,
+                      style: TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w900, color: color, fontFamily: 'monospace')),
+                  Text(unit, style: const TextStyle(fontSize: 9, color: kSoftGray)),
+                ],
+              );
+            }
+			            // ============ TAB 3: PARENTAL CONTROL ============
             Widget _buildParentalControlTab(String myId, List<dynamic> linkedChildren) {
               final TextEditingController childIdCtrl = TextEditingController();
               final TextEditingController childNameCtrl = TextEditingController();
@@ -1999,14 +2872,26 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Link new device
                     Container(
                       padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
+                      decoration: BoxDecoration(
+                        color: kWhite,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: kMandarinOrange, width: 2),
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          const Text("ربط جهاز عائلي", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: kBlack)),
-                          const SizedBox(height: 10),
+                          const Row(
+                            children: [
+                              Icon(Icons.add_link, color: kMandarinOrange, size: 22),
+                              SizedBox(width: 8),
+                              Text("ربط جهاز عائلي",
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
                           Row(
                             children: [
                               Expanded(
@@ -2014,19 +2899,27 @@ jobs:
                                   controller: childIdCtrl,
                                   keyboardType: TextInputType.number,
                                   style: const TextStyle(color: kBlack),
-                                  decoration: const InputDecoration(labelText: "رقم حساب الجهاز"),
+                                  decoration: const InputDecoration(
+                                    labelText: "رقم حساب الجهاز",
+                                    prefixIcon: Icon(Icons.numbers, color: kMandarinOrange),
+                                  ),
                                 ),
                               ),
                               const SizedBox(width: 8),
-                              IconButton.filled(
-                                style: IconButton.styleFrom(backgroundColor: kMandarinOrange, foregroundColor: kBlack),
-                                icon: const Icon(Icons.qr_code_scanner),
-                                onPressed: () async {
-                                  final scanned = await _openQrScannerModal("مسح رمز جهاز العائلة");
-                                  if (scanned != null && scanned.isNotEmpty) {
-                                    childIdCtrl.text = scanned.replaceAll('LINK:', '').trim();
-                                  }
-                                },
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: kMandarinOrange,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: IconButton(
+                                  icon: const Icon(Icons.qr_code_scanner, color: kBlack),
+                                  onPressed: () async {
+                                    final scanned = await _openQrScannerModal("مسح رمز جهاز العائلة");
+                                    if (scanned != null && scanned.isNotEmpty) {
+                                      childIdCtrl.text = scanned.replaceAll('LINK:', '').trim();
+                                    }
+                                  },
+                                ),
                               ),
                             ],
                           ),
@@ -2034,7 +2927,10 @@ jobs:
                           TextField(
                             controller: childNameCtrl,
                             style: const TextStyle(color: kBlack),
-                            decoration: const InputDecoration(labelText: "الاسم (مثال: جوال أحمد)"),
+                            decoration: const InputDecoration(
+                              labelText: "الاسم المحلي (مثال: جوال أحمد)",
+                              prefixIcon: Icon(Icons.badge, color: kMandarinOrange),
+                            ),
                           ),
                           const SizedBox(height: 12),
                           ElevatedButton.icon(
@@ -2053,14 +2949,47 @@ jobs:
                         ],
                       ),
                     ),
-                    const SizedBox(height: 16),
-                    const Text("الأجهزة المرتبطة", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 20),
+
+                    // Linked children header
+                    Row(
+                      children: [
+                        const Icon(Icons.family_restroom, color: kMandarinOrange, size: 22),
+                        const SizedBox(width: 8),
+                        const Text("الأجهزة المرتبطة",
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: kBlack)),
+                        const Spacer(),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: kMandarinOrange,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text("${linkedChildren.length}",
+                              style: const TextStyle(color: kBlack, fontWeight: FontWeight.bold, fontSize: 12)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
                     if (linkedChildren.isEmpty)
                       Container(
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16)),
-                        child: const Text("لا توجد أجهزة مرتبطة.", style: TextStyle(fontSize: 13, color: kSoftGray)),
+                        padding: const EdgeInsets.all(30),
+                        decoration: BoxDecoration(
+                          color: kLightGray,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: kMidGray),
+                        ),
+                        child: const Column(
+                          children: [
+                            Icon(Icons.family_restroom, size: 48, color: kSoftGray),
+                            SizedBox(height: 12),
+                            Text("لا توجد أجهزة مرتبطة بعد",
+                                style: TextStyle(fontSize: 14, color: kSoftGray, fontWeight: FontWeight.bold)),
+                            SizedBox(height: 4),
+                            Text("اربط جهاز طفلك للتحكم في استخدامه",
+                                style: TextStyle(fontSize: 11, color: kSoftGray)),
+                          ],
+                        ),
                       ),
                     for (final cid in linkedChildren) _buildChildControlCard(cid.toString()),
                   ],
@@ -2080,64 +3009,157 @@ jobs:
                   final bool locked = (c['parental_locked'] ?? false) == true;
                   final bool childEco = (c['eco_mode'] ?? false) == true;
                   final int timeLimit = ((c['daily_time_limit_mins'] ?? 0) as num).toInt();
+                  final int usedMins = ((c['used_time_today_mins'] ?? 0) as num).toInt();
                   final List<String> blockedCats = List<String>.from((c['blocked_categories'] as List<dynamic>?) ?? []);
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 14),
                     padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(color: kWhite, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
+                    decoration: BoxDecoration(
+                      color: kWhite,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: locked ? kDanger.withOpacity(0.5) : kMandarinOrange,
+                        width: 2,
+                      ),
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // Header
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text("$localName (#$childId)", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kMandarinOrange)),
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: locked ? kDanger.withOpacity(0.15) : kMandarinOrange.withOpacity(0.15),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(
+                                locked ? Icons.lock : Icons.phone_android,
+                                color: locked ? kDanger : kMandarinOrange,
+                                size: 20,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(localName,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                                  Text("#$childId",
+                                      style: const TextStyle(fontSize: 11, color: kSoftGray, fontFamily: 'monospace')),
+                                ],
+                              ),
+                            ),
                             Switch(
                               value: !locked,
-                              activeColor: kMandarinOrange,
+                              activeColor: kSuccess,
+                              inactiveThumbColor: kDanger,
                               onChanged: (allow) {
                                 db.collection('wallets').doc(childId).update({'parental_locked': !allow});
                               },
                             ),
                           ],
                         ),
-                        const Divider(color: kMidGray),
+
+                        if (locked)
+                          Container(
+                            margin: const EdgeInsets.only(top: 10),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: kDanger.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: kDanger.withOpacity(0.3)),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.block, color: kDanger, size: 16),
+                                SizedBox(width: 6),
+                                Text("الاستخدام موقوف حالياً",
+                                    style: TextStyle(fontSize: 12, color: kDanger, fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                          ),
+
+                        const Divider(color: kMidGray, height: 20),
+
+                        // Eco mode
                         SwitchListTile(
-                          contentPadding: EdgeInsets.zero, dense: true,
-                          title: const Text("الوضع الاقتصادي", style: TextStyle(color: kBlack, fontSize: 13)),
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          secondary: const Icon(Icons.eco, color: kSuccess, size: 20),
+                          title: const Text("الوضع الاقتصادي",
+                              style: TextStyle(color: kBlack, fontSize: 13, fontWeight: FontWeight.bold)),
+                          subtitle: const Text("توفير الرصيد",
+                              style: TextStyle(fontSize: 10, color: kSoftGray)),
                           value: childEco,
                           activeColor: kMandarinOrange,
                           onChanged: (v) => db.collection('wallets').doc(childId).update({'eco_mode': v}),
                         ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text("الحد اليومي: ${timeLimit == 0 ? 'مفتوح' : '$timeLimit د'}",
-                                 style: const TextStyle(fontSize: 13, color: kBlack)),
-                            DropdownButton<int>(
-                              value: [0, 60, 120, 180, 300].contains(timeLimit) ? timeLimit : 0,
-                              dropdownColor: kWhite,
-                              items: const [
-                                DropdownMenuItem(value: 0, child: Text("مفتوح", style: TextStyle(color: kBlack))),
-                                DropdownMenuItem(value: 60, child: Text("ساعة", style: TextStyle(color: kBlack))),
-                                DropdownMenuItem(value: 120, child: Text("ساعتان", style: TextStyle(color: kBlack))),
-                                DropdownMenuItem(value: 180, child: Text("3 ساعات", style: TextStyle(color: kBlack))),
-                                DropdownMenuItem(value: 300, child: Text("5 ساعات", style: TextStyle(color: kBlack))),
-                              ],
-                              onChanged: (val) {
-                                if (val != null) db.collection('wallets').doc(childId).update({'daily_time_limit_mins': val});
-                              },
-                            ),
-                          ],
+
+                        // Time limit
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: kLightGray,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.timer, color: kMandarinOrange, size: 20),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text("الحد اليومي",
+                                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack)),
+                                    Text(
+                                      timeLimit == 0
+                                          ? "مفتوح (بلا حد)"
+                                          : "$usedMins / $timeLimit دقيقة مستخدمة",
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: (timeLimit > 0 && usedMins >= timeLimit) ? kDanger : kSoftGray,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              DropdownButton<int>(
+                                value: [0, 60, 120, 180, 300].contains(timeLimit) ? timeLimit : 0,
+                                dropdownColor: kWhite,
+                                underline: Container(),
+                                items: const [
+                                  DropdownMenuItem(value: 0, child: Text("مفتوح", style: TextStyle(color: kBlack, fontSize: 12))),
+                                  DropdownMenuItem(value: 60, child: Text("ساعة", style: TextStyle(color: kBlack, fontSize: 12))),
+                                  DropdownMenuItem(value: 120, child: Text("ساعتان", style: TextStyle(color: kBlack, fontSize: 12))),
+                                  DropdownMenuItem(value: 180, child: Text("3 ساعات", style: TextStyle(color: kBlack, fontSize: 12))),
+                                  DropdownMenuItem(value: 300, child: Text("5 ساعات", style: TextStyle(color: kBlack, fontSize: 12))),
+                                ],
+                                onChanged: (val) {
+                                  if (val != null) db.collection('wallets').doc(childId).update({'daily_time_limit_mins': val});
+                                },
+                              ),
+                            ],
+                          ),
                         ),
-                        const SizedBox(height: 8),
+
+                        const SizedBox(height: 10),
+
+                        // Categories
+                        const Text("حظر الفئات",
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack)),
+                        const SizedBox(height: 6),
                         Wrap(
-                          spacing: 8, runSpacing: 8,
+                          spacing: 6, runSpacing: 6,
                           children: [
-                            _filterChip(childId, blockedCats, 'games', 'حظر الألعاب'),
-                            _filterChip(childId, blockedCats, 'social', 'حظر التواصل'),
-                            _filterChip(childId, blockedCats, 'video', 'حظر الفيديو'),
+                            _filterChip(childId, blockedCats, 'games', '🎮 الألعاب'),
+                            _filterChip(childId, blockedCats, 'social', '📱 التواصل'),
+                            _filterChip(childId, blockedCats, 'video', '🎬 الفيديو'),
                           ],
                         ),
                       ],
@@ -2148,20 +3170,31 @@ jobs:
             }
 
             Widget _filterChip(String childId, List<String> cats, String key, String label) {
-              return FilterChip(
-                label: Text(label, style: const TextStyle(color: kBlack, fontSize: 12)),
-                selected: cats.contains(key),
-                selectedColor: kMandarinOrange,
-                backgroundColor: kLightGray,
-                onSelected: (sel) {
+              final selected = cats.contains(key);
+              return GestureDetector(
+                onTap: () {
                   final next = List<String>.from(cats);
-                  sel ? next.add(key) : next.remove(key);
+                  selected ? next.remove(key) : next.add(key);
                   FirebaseFirestore.instance.collection('wallets').doc(childId).update({'blocked_categories': next});
                 },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: selected ? kMandarinOrange : kLightGray,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: selected ? kMandarinOrange : kMidGray),
+                  ),
+                  child: Text(label,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: kBlack,
+                          fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
+                ),
               );
             }
 
-            Widget _buildContactsAndHostWalletTab(String myId) {
+            // ============ TAB 4: CONTACTS & HOST WALLET ============
+            Widget _buildContactsAndHostWalletTab(String myId, Map<String, dynamic> w) {
               final idCtrl = TextEditingController();
               final nameCtrl = TextEditingController();
               final db = FirebaseFirestore.instance;
@@ -2171,6 +3204,7 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Host cards (if user owns host)
                     StreamBuilder<QuerySnapshot>(
                       stream: db.collection('hosts').where('owner_wallet_id', isEqualTo: myId).snapshots(),
                       builder: (context, hostSnap) {
@@ -2187,54 +3221,127 @@ jobs:
                           hostCards.add(
                             Container(
                               margin: const EdgeInsets.only(bottom: 16),
-                              padding: const EdgeInsets.all(16),
+                              padding: const EdgeInsets.all(18),
                               decoration: BoxDecoration(
-                                color: kMandarinOrange.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(18),
-                                border: Border.all(color: kMandarinOrange, width: 1.5),
+                                gradient: const LinearGradient(
+                                  colors: [kMandarinOrange, kMandarinDark],
+                                  begin: Alignment.topRight,
+                                  end: Alignment.bottomLeft,
+                                ),
+                                borderRadius: BorderRadius.circular(20),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: kMandarinOrange.withOpacity(0.3),
+                                    blurRadius: 12,
+                                    offset: const Offset(0, 6),
+                                  ),
+                                ],
                               ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      Text("📡 $netName", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                                      const Icon(Icons.router, color: kBlack, size: 24),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(netName,
+                                                style: const TextStyle(
+                                                    fontWeight: FontWeight.bold, fontSize: 16, color: kBlack)),
+                                            Text(hostId,
+                                                style: const TextStyle(
+                                                    fontSize: 10, color: kBlack, fontFamily: 'monospace')),
+                                          ],
+                                        ),
+                                      ),
                                       Container(
                                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                        decoration: BoxDecoration(color: kMandarinOrange, borderRadius: BorderRadius.circular(10)),
-                                        child: Text("#$myId", style: const TextStyle(fontSize: 11, color: kBlack, fontWeight: FontWeight.bold)),
+                                        decoration: BoxDecoration(
+                                            color: kBlack.withOpacity(0.2), borderRadius: BorderRadius.circular(8)),
+                                        child: Text("#$myId",
+                                            style: const TextStyle(
+                                                fontSize: 10, color: kBlack, fontWeight: FontWeight.bold)),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 14),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          const Text("إجمالي المبيعات",
+                                              style: TextStyle(fontSize: 10, color: kBlack)),
+                                          Text("${wanMb.toStringAsFixed(0)} MB",
+                                              style: const TextStyle(
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.w900,
+                                                  color: kBlack,
+                                                  fontFamily: 'monospace')),
+                                        ],
+                                      ),
+                                      Column(
+                                        crossAxisAlignment: CrossAxisAlignment.end,
+                                        children: [
+                                          const Text("متاح للسحب",
+                                              style: TextStyle(fontSize: 10, color: kBlack)),
+                                          Text("$dueYer ريال",
+                                              style: const TextStyle(
+                                                  fontSize: 20, fontWeight: FontWeight.w900, color: kBlack)),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                  const Divider(color: kBlack, height: 20, thickness: 1),
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.sync_alt, color: kBlack, size: 18),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          autoTransfer ? "تحويل تلقائي إلى محفظتك" : "سحب يدوي",
+                                          style: const TextStyle(
+                                              fontSize: 11, color: kBlack, fontWeight: FontWeight.bold),
+                                        ),
+                                      ),
+                                      Switch(
+                                        value: autoTransfer,
+                                        activeColor: kBlack,
+                                        activeTrackColor: kWhite,
+                                        onChanged: (val) async {
+                                          await widget.engine.toggleHostAutoTransfer(hostId, val);
+                                          setState(() => _feedback = val
+                                              ? "✅ تحويل تلقائي مفعل"
+                                              : "تم جعله يدوياً");
+                                        },
                                       ),
                                     ],
                                   ),
                                   const SizedBox(height: 10),
-                                  Text("إجمالي المبيعات: ${wanMb.toStringAsFixed(0)} MB", style: const TextStyle(fontSize: 12, color: kSoftGray)),
-                                  const SizedBox(height: 4),
-                                  Text("متاح للسحب: $dueYer ريال", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: kMandarinOrange)),
-                                  const Divider(color: kMidGray, height: 18),
-                                  SwitchListTile(
-                                    contentPadding: EdgeInsets.zero, dense: true,
-                                    title: const Text("تحويل تلقائي إلى محفظتي", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: kBlack)),
-                                    value: autoTransfer,
-                                    activeColor: kMandarinOrange,
-                                    onChanged: (val) async {
-                                      await widget.engine.toggleHostAutoTransfer(hostId, val);
-                                      setState(() => _feedback = val ? "✅ تحويل تلقائي مفعل" : "تم جعله يدوياً");
-                                    },
-                                  ),
-                                  const SizedBox(height: 8),
                                   SizedBox(
                                     width: double.infinity,
+                                    height: 44,
                                     child: ElevatedButton.icon(
-                                      icon: const Icon(Icons.download_for_offline, color: kBlack),
-                                      label: const Text("سحب المستحقات", style: TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: kBlack,
+                                        foregroundColor: kMandarinOrange,
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                      ),
+                                      icon: const Icon(Icons.download_for_offline, size: 20),
+                                      label: const Text("سحب المستحقات",
+                                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                                       onPressed: dueYer > 0
                                           ? () async {
                                               try {
                                                 final pulled = await widget.engine.withdrawHostEarningsToMyWallet(hostId);
                                                 setState(() => _feedback = "✅ تم سحب $pulled ريال");
                                               } catch (e) {
-                                                setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
+                                                setState(() =>
+                                                    _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                                               }
                                             }
                                           : null,
@@ -2248,55 +3355,104 @@ jobs:
                         return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: hostCards);
                       },
                     ),
+
+                    // Traffic source card
                     _buildTrafficSourceCard(myId),
-                    const SizedBox(height: 16),
+
+                    // Save local contact
                     Container(
                       padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
+                      decoration: BoxDecoration(
+                        color: kWhite,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: kMandarinOrange, width: 2),
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          const Text("حفظ جهة محلية", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                          const Row(
+                            children: [
+                              Icon(Icons.person_add, color: kMandarinOrange, size: 22),
+                              SizedBox(width: 8),
+                              Text("حفظ جهة محلية",
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                            ],
+                          ),
                           const SizedBox(height: 12),
                           TextField(
                             controller: idCtrl,
                             keyboardType: TextInputType.number,
                             style: const TextStyle(color: kBlack),
-                            decoration: const InputDecoration(labelText: "رقم الحساب"),
+                            decoration: const InputDecoration(
+                              labelText: "رقم الحساب",
+                              prefixIcon: Icon(Icons.tag, color: kMandarinOrange),
+                            ),
                           ),
                           const SizedBox(height: 10),
                           TextField(
                             controller: nameCtrl,
                             style: const TextStyle(color: kBlack),
-                            decoration: const InputDecoration(labelText: "الاسم المحلي"),
+                            decoration: const InputDecoration(
+                              labelText: "الاسم",
+                              prefixIcon: Icon(Icons.badge, color: kMandarinOrange),
+                            ),
                           ),
                           const SizedBox(height: 12),
-                          ElevatedButton(
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.save, color: kBlack),
+                            label: const Text("حفظ",
+                                style: TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
                             onPressed: () async {
                               await widget.engine.saveLocalContact(idCtrl.text, nameCtrl.text);
                               await _loadContacts();
                               setState(() => _feedback = "✅ تم الحفظ محلياً");
                             },
-                            child: const Text("حفظ", style: TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
                           ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 16),
+
+                    // QR card
                     Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: kWhite,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: kMandarinOrange, width: 3),
+                      ),
                       child: Column(
                         children: [
-                          const Text("رمز الحساب", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
-                          const SizedBox(height: 12),
+                          const Icon(Icons.qr_code_2, color: kMandarinOrange, size: 32),
+                          const SizedBox(height: 8),
+                          const Text("رمز حسابك للمشاركة",
+                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                          const SizedBox(height: 16),
                           Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(color: kWhite, borderRadius: BorderRadius.circular(12), border: Border.all(color: kMandarinOrange, width: 2)),
-                            child: QrImageView(data: "LINK:$myId", version: QrVersions.auto, size: 280.0),
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: kWhite,
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(color: kMidGray),
+                            ),
+                            child: QrImageView(
+                              data: "LINK:$myId",
+                              version: QrVersions.auto,
+                              size: 280.0,
+                              backgroundColor: kWhite,
+                            ),
                           ),
-                          const SizedBox(height: 10),
-                          Text("حساب #$myId", style: const TextStyle(fontWeight: FontWeight.bold, color: kBlack, fontSize: 16)),
+                          const SizedBox(height: 14),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: kMandarinOrange,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text("حساب #$myId",
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w900, color: kBlack, fontSize: 18)),
+                          ),
                         ],
                       ),
                     ),
@@ -2305,12 +3461,14 @@ jobs:
               );
             }
 
+            // ============ TRAFFIC SOURCE CARD ============
             Widget _buildTrafficSourceCard(String myId) {
               final db = FirebaseFirestore.instance;
               return StreamBuilder<QuerySnapshot>(
-                stream: db.collection('transactions')
+                stream: db
+                    .collection('transactions')
                     .where('wallet_id', isEqualTo: myId)
-                    .where('type', isEqualTo: 'quota_purchase')
+                    .where('type', whereIn: ['portable_purchase', 'consumption'])
                     .orderBy('timestamp', descending: true)
                     .limit(10)
                     .snapshots(),
@@ -2319,13 +3477,25 @@ jobs:
                     return Container(
                       padding: const EdgeInsets.all(16),
                       margin: const EdgeInsets.only(bottom: 16),
-                      decoration: BoxDecoration(color: kLightGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMidGray)),
+                      decoration: BoxDecoration(
+                        color: kLightGray,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: kMidGray),
+                      ),
                       child: const Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text("سجل مصدر الترافيك", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                          Row(
+                            children: [
+                              Icon(Icons.route, color: kMandarinOrange, size: 20),
+                              SizedBox(width: 8),
+                              Text("سجل العمليات",
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: kBlack)),
+                            ],
+                          ),
                           SizedBox(height: 8),
-                          Text("لا توجد عمليات شراء بعد", style: TextStyle(fontSize: 12, color: kSoftGray)),
+                          Text("لا توجد عمليات بعد",
+                              style: TextStyle(fontSize: 12, color: kSoftGray)),
                         ],
                       ),
                     );
@@ -2335,7 +3505,11 @@ jobs:
                   return Container(
                     padding: const EdgeInsets.all(16),
                     margin: const EdgeInsets.only(bottom: 16),
-                    decoration: BoxDecoration(color: kWhite, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMandarinOrange, width: 1.5)),
+                    decoration: BoxDecoration(
+                      color: kWhite,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: kMandarinOrange, width: 2),
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -2343,11 +3517,12 @@ jobs:
                           children: [
                             Icon(Icons.route, color: kMandarinOrange, size: 20),
                             SizedBox(width: 8),
-                            Text("سجل مصدر الترافيك", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                            Text("آخر العمليات",
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: kBlack)),
                           ],
                         ),
-                        const SizedBox(height: 12),
-                        for (final doc in docs) _buildTxRow(doc.data() as Map<String, dynamic>),
+                        const SizedBox(height: 10),
+                        ...docs.map((doc) => _buildTxRow(doc.data() as Map<String, dynamic>)),
                       ],
                     ),
                   );
@@ -2356,59 +3531,128 @@ jobs:
             }
 
             Widget _buildTxRow(Map<String, dynamic> tx) {
-              final int mb = ((tx['chunk_mb'] ?? 0) as num).toInt();
-              final int cost = ((tx['chunk_cost_yer'] ?? 0) as num).toInt();
+              final String type = (tx['type'] ?? '').toString();
+              final bool isPurchase = type == 'portable_purchase';
+              final int mb = ((tx['chunk_mb'] ?? tx['mb_delta'] ?? 0) as num).toInt();
+              final int cost = ((tx['chunk_cost_yer'] ?? tx['mb_cost_yer'] ?? 0) as num).toInt();
               final String src = (tx['data_source'] ?? 'host_wan').toString();
               final bool fromMyPort = src == 'my_port';
+              final String trigger = (tx['trigger'] ?? '').toString();
               final DateTime? ts = (tx['timestamp'] as Timestamp?)?.toDate();
               final String timeStr = ts != null
                   ? "${ts.day}/${ts.month} ${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}"
                   : "--";
 
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: isPurchase ? kMandarinOrange.withOpacity(0.08) : kLightGray,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isPurchase ? kMandarinOrange.withOpacity(0.3) : kMidGray,
+                  ),
+                ),
                 child: Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      padding: const EdgeInsets.all(6),
                       decoration: BoxDecoration(
-                        color: fromMyPort ? kMandarinOrange : kLightGray,
+                        color: isPurchase ? kMandarinOrange : kSuccess.withOpacity(0.15),
                         borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: fromMyPort ? kMandarinOrange : kMidGray),
                       ),
-                      child: Text(
-                        fromMyPort ? "منفذي" : "شبكة المالك",
-                        style: const TextStyle(fontSize: 10, color: kBlack, fontWeight: FontWeight.bold),
+                      child: Icon(
+                        isPurchase ? Icons.shopping_cart : Icons.downloading,
+                        size: 14,
+                        color: isPurchase ? kBlack : kSuccess,
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Expanded(child: Text("$mb MB", style: const TextStyle(color: kBlack, fontSize: 13))),
-                    Text("$cost ريال", style: const TextStyle(color: kBlack, fontSize: 13, fontWeight: FontWeight.bold)),
-                    const SizedBox(width: 8),
-                    Text(timeStr, style: const TextStyle(color: kSoftGray, fontSize: 11)),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isPurchase ? "شراء $mb MB" : "استهلاك $mb MB",
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack),
+                          ),
+                          Text(
+                            trigger.isNotEmpty ? trigger : timeStr,
+                            style: const TextStyle(fontSize: 9, color: kSoftGray),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (!isPurchase)
+                      Container(
+                        margin: const EdgeInsets.only(left: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: fromMyPort ? kMandarinOrange : kSuccess,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          fromMyPort ? "منفذي" : "شبكة",
+                          style: const TextStyle(fontSize: 8, color: kBlack, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    const SizedBox(width: 6),
+                    Text("$cost ر",
+                        style: const TextStyle(
+                            fontSize: 12, color: kMandarinOrange, fontWeight: FontWeight.w900)),
                   ],
                 ),
               );
             }
 
+            // ============ MY QR SHEET ============
             void _showMyQrSheet(String myId) {
               showModalBottomSheet(
                 context: context,
                 backgroundColor: kWhite,
-                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
                 builder: (ctx) => Padding(
                   padding: const EdgeInsets.all(24),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text("رمز الحساب #$myId", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: kBlack)),
-                      const SizedBox(height: 16),
                       Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(color: kWhite, borderRadius: BorderRadius.circular(16), border: Border.all(color: kMandarinOrange, width: 2)),
-                        child: QrImageView(data: myId, version: QrVersions.auto, size: 280.0),
+                        width: 40, height: 4,
+                        decoration: BoxDecoration(color: kMidGray, borderRadius: BorderRadius.circular(2)),
                       ),
                       const SizedBox(height: 16),
+                      const Text("رمز حسابك",
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: kBlack)),
+                      Text("#$myId",
+                          style: const TextStyle(fontSize: 13, color: kSoftGray, fontFamily: 'monospace')),
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: kWhite,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: kMandarinOrange, width: 3),
+                        ),
+                        child: QrImageView(
+                          data: myId,
+                          version: QrVersions.auto,
+                          size: 280.0,
+                          backgroundColor: kWhite,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: kMandarinOrange,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text("حساب #$myId",
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack)),
+                      ),
+                      const SizedBox(height: 8),
                     ],
                   ),
                 ),
@@ -2416,6 +3660,7 @@ jobs:
             }
           }
 
+          // ============ QR SCANNER SHEET ============
           class _QrScannerSheet extends StatefulWidget {
             final String title;
             final TextEditingController manualCtrl;
@@ -2439,21 +3684,44 @@ jobs:
             Widget build(BuildContext context) {
               return Container(
                 padding: const EdgeInsets.all(16),
-                height: 520,
+                height: 560,
+                decoration: const BoxDecoration(
+                  color: kWhite,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
                 child: Column(
                   children: [
+                    Container(
+                      width: 40, height: 4,
+                      decoration: BoxDecoration(color: kMidGray, borderRadius: BorderRadius.circular(2)),
+                    ),
+                    const SizedBox(height: 12),
                     Row(
                       children: [
-                        const Icon(Icons.qr_code_scanner, color: kMandarinOrange, size: 26),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text(widget.title, style: const TextStyle(color: kBlack, fontWeight: FontWeight.bold, fontSize: 16))),
-                        IconButton(icon: const Icon(Icons.close, color: kBlack), onPressed: () => Navigator.pop(context)),
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: kMandarinOrange.withOpacity(0.15),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.qr_code_scanner, color: kMandarinOrange, size: 24),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(widget.title,
+                              style: const TextStyle(
+                                  color: kBlack, fontWeight: FontWeight.bold, fontSize: 16)),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: kBlack),
+                          onPressed: () => Navigator.pop(context),
+                        ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 12),
                     Expanded(
                       child: ClipRRect(
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(20),
                         child: Stack(
                           children: [
                             MobileScanner(
@@ -2470,48 +3738,109 @@ jobs:
                                 }
                               },
                             ),
+                            // Overlay with frame
                             Container(
                               alignment: Alignment.center,
                               child: Container(
                                 width: 240, height: 240,
                                 decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(color: kMandarinOrange, width: 3),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: kMandarinOrange, width: 4),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: kMandarinOrange.withOpacity(0.5),
+                                      blurRadius: 20,
+                                      spreadRadius: 2,
+                                    ),
+                                  ],
                                 ),
                               ),
+                            ),
+                            // Corner markers
+                            Positioned(
+                              top: 20, left: 20,
+                              child: _cornerMarker(Alignment.topLeft),
+                            ),
+                            Positioned(
+                              top: 20, right: 20,
+                              child: _cornerMarker(Alignment.topRight),
+                            ),
+                            Positioned(
+                              bottom: 20, left: 20,
+                              child: _cornerMarker(Alignment.bottomLeft),
+                            ),
+                            Positioned(
+                              bottom: 20, right: 20,
+                              child: _cornerMarker(Alignment.bottomRight),
                             ),
                           ],
                         ),
                       ),
                     ),
                     const SizedBox(height: 12),
-                    const Text("وجّه الكاميرا نحو رمز QR", style: TextStyle(fontSize: 12, color: kSoftGray)),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: widget.manualCtrl,
-                            keyboardType: TextInputType.number,
-                            style: const TextStyle(color: kBlack),
-                            decoration: const InputDecoration(
-                              hintText: "أو أدخل الرقم يدوياً...",
-                              labelText: "إدخال يدوي",
+                    const Text("وجّه الكاميرا نحو رمز QR",
+                        style: TextStyle(fontSize: 13, color: kSoftGray, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: kLightGray,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: kMidGray),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: widget.manualCtrl,
+                              keyboardType: TextInputType.number,
+                              style: const TextStyle(color: kBlack),
+                              decoration: const InputDecoration(
+                                hintText: "أو أدخل الرقم يدوياً...",
+                                prefixIcon: Icon(Icons.keyboard, color: kMandarinOrange),
+                                filled: false,
+                                border: InputBorder.none,
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        ElevatedButton(
-                          style: ElevatedButton.styleFrom(backgroundColor: kMandarinOrange, foregroundColor: kBlack),
-                          onPressed: () {
-                            final v = widget.manualCtrl.text.trim();
-                            if (v.isNotEmpty) Navigator.pop(context, v);
-                          },
-                          child: const Text("تأكيد", style: TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
-                        ),
-                      ],
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: kMandarinOrange,
+                              foregroundColor: kBlack,
+                            ),
+                            onPressed: () {
+                              final v = widget.manualCtrl.text.trim();
+                              if (v.isNotEmpty) Navigator.pop(context, v);
+                            },
+                            child: const Text("تأكيد",
+                                style: TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
+                ),
+              );
+            }
+
+            Widget _cornerMarker(Alignment alignment) {
+              return Container(
+                width: 40, height: 40,
+                decoration: BoxDecoration(
+                  border: Border(
+                    top: alignment == Alignment.topLeft || alignment == Alignment.topRight
+                        ? const BorderSide(color: kMandarinOrange, width: 3)
+                        : BorderSide.none,
+                    bottom: alignment == Alignment.bottomLeft || alignment == Alignment.bottomRight
+                        ? const BorderSide(color: kMandarinOrange, width: 3)
+                        : BorderSide.none,
+                    left: alignment == Alignment.topLeft || alignment == Alignment.bottomLeft
+                        ? const BorderSide(color: kMandarinOrange, width: 3)
+                        : BorderSide.none,
+                    right: alignment == Alignment.topRight || alignment == Alignment.bottomRight
+                        ? const BorderSide(color: kMandarinOrange, width: 3)
+                        : BorderSide.none,
+                  ),
                 ),
               );
             }
@@ -2519,8 +3848,8 @@ jobs:
           main_clean = "\n".join(l[10:] if l.startswith("          ") else l for l in main_code.splitlines())
           main_clean = main_clean.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           open("lib/main.dart", "w", encoding="utf-8").write(main_clean)
-          print("PART3_DONE_MAIN_DART_READY")
-          
+          print("PART5_DONE_MAIN_DART_FULL")
+		  # ============ GRADLE MODIFICATIONS ============
           for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(app_g):
                   txt = open(app_g).read()
@@ -2528,15 +3857,30 @@ jobs:
                   txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
                   open(app_g, "w").write(txt)
 
-          # إضافة مستودع mobile_scanner (CameraX requirement)
-          for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              if os.path.exists(app_g):
-                  txt = open(app_g).read()
-                  if "minSdkVersion 23" in txt or "minSdk = 23" in txt:
-                      pass
-                  open(app_g, "w").write(txt)
+          # تفعيل multidex لدعم Firebase + mobile_scanner
+          gradle_kts = "android/app/build.gradle.kts"
+          gradle_groovy = "android/app/build.gradle"
+          if os.path.exists(gradle_kts):
+              txt = open(gradle_kts).read()
+              if "multiDexEnabled = true" not in txt:
+                  txt = txt.replace(
+                      'defaultConfig {',
+                      'defaultConfig {\n        multiDexEnabled = true'
+                  )
+                  open(gradle_kts, "w").write(txt)
+          elif os.path.exists(gradle_groovy):
+              txt = open(gradle_groovy).read()
+              if "multiDexEnabled true" not in txt:
+                  txt = txt.replace(
+                      'defaultConfig {',
+                      'defaultConfig {\n        multiDexEnabled true'
+                  )
+                  open(gradle_groovy, "w").write(txt)
 
-          print("PART4_DONE_BUILD_CONFIG_READY")
+          print("PART6_DONE_BUILD_CONFIG_READY")
+          print("===========================================")
+          print("LVNO SmartClient V10 — All files generated")
+          print("===========================================")
 
       - name: Install Flutter Dependencies
         run: flutter pub get
@@ -2547,5 +3891,8 @@ jobs:
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
         with:
-          name: LVNO-SmartClient-Release-APK
+          name: LVNO-SmartClient-V10
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+			
