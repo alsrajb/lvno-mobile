@@ -67,7 +67,7 @@ jobs:
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App V5
           publish_to: 'none'
-          version: 5.0.2+12
+          version: 5.0.3+13
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -168,21 +168,6 @@ jobs:
                   }
               }
 
-              private fun isPayloadBlocked(rawBytes: ByteArray, length: Int): Boolean {
-                  if (blockedDomains.isEmpty() || length <= 28) return false
-                  return try {
-                      val payloadStr = rawBytes.decodeToString(20, length, throwOnInvalidSequence = false).lowercase()
-                      for (domain in blockedDomains) {
-                          if (domain.isNotEmpty() && payloadStr.contains(domain)) {
-                              return true
-                          }
-                      }
-                      false
-                  } catch (_: Exception) {
-                      false
-                  }
-              }
-
               private fun startPacketEngine() {
                   workerThread = Thread {
                       val fd = vpnInterface?.fileDescriptor ?: return@Thread
@@ -197,10 +182,6 @@ jobs:
                               }
                               val length = inputStream.read(packet.array())
                               if (length > 20) {
-                                  if (isPayloadBlocked(packet.array(), length)) {
-                                      packet.clear()
-                                      continue
-                                  }
                                   tunnelInspectorBytes.addAndGet(length.toLong())
                                   if (ecoModeEnabled.get() && length > 1100) {
                                       Thread.sleep(6)
@@ -1705,16 +1686,17 @@ jobs:
                               padding: EdgeInsets.all(12.0),
                               child: Text("لا توجد جهات مطابقة.", style: TextStyle(fontSize: 12, color: Colors.white54)),
                             ),
-                          ...filteredContacts.map((entry) => ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                leading: const CircleAvatar(backgroundColor: Color(0xFF065F46), child: Icon(Icons.person, color: Colors.white)),
-                                title: Text(entry.value, style: const TextStyle(fontWeight: FontWeight.bold)),
-                                subtitle: Text("حساب #${entry.key}"),
-                                trailing: ElevatedButton(
-                                  onPressed: () => setState(() => _receiverCtrl.text = entry.key),
-                                  child: const Text("اختيار"),
-                                ),
-                              )),
+                          for (final entry in filteredContacts)
+                            ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: const CircleAvatar(backgroundColor: Color(0xFF065F46), child: Icon(Icons.person, color: Colors.white)),
+                              title: Text(entry.value, style: const TextStyle(fontWeight: FontWeight.bold)),
+                              subtitle: Text("حساب #${entry.key}"),
+                              trailing: ElevatedButton(
+                                onPressed: () => setState(() => _receiverCtrl.text = entry.key),
+                                child: const Text("اختيار"),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -1996,7 +1978,8 @@ jobs:
                         decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
                         child: const Text("لا توجد أجهزة مرتبطة حالياً.", style: TextStyle(fontSize: 13, color: Colors.white60)),
                       ),
-                    ...linkedChildren.map((cid) => _buildChildControlCard(cid.toString())),
+                    for (final cid in linkedChildren)
+                      _buildChildControlCard(cid.toString()),
                   ],
                 ),
               );
@@ -2156,19 +2139,20 @@ jobs:
                           ],
                         ),
                         const SizedBox(height: 12),
-                        ...currentDomains.map((dom) => ListTile(
-                              dense: true,
-                              title: Text(dom),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                                onPressed: () {
-                                  FirebaseFirestore.instance.collection('wallets').doc(childId).update({
-                                    'custom_blocked_domains': FieldValue.arrayRemove([dom]),
-                                  });
-                                  Navigator.pop(ctx);
-                                },
-                              ),
-                            )),
+                        for (final dom in currentDomains)
+                          ListTile(
+                            dense: true,
+                            title: Text(dom),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                              onPressed: () {
+                                FirebaseFirestore.instance.collection('wallets').doc(childId).update({
+                                  'custom_blocked_domains': FieldValue.arrayRemove([dom]),
+                                });
+                                Navigator.pop(ctx);
+                              },
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -2192,17 +2176,17 @@ jobs:
                         if (!hostSnap.hasData || hostSnap.data!.docs.isEmpty) {
                           return const SizedBox.shrink();
                         }
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: hostSnap.data!.docs.map((doc) {
-                            final h = doc.data() as Map<String, dynamic>;
-                            final String hostId = doc.id;
-                            final String netName = (h['network_name'] ?? hostId).toString();
-                            final int dueYer = ((h['amount_due_yer'] ?? 0) as num).toInt();
-                            final num wanMb = (h['current_month_wan_mb'] ?? 0) as num;
-                            final bool autoTransfer = (h['auto_transfer_to_wallet'] ?? false) == true;
+                        final List<Widget> hostCards = [];
+                        for (final doc in hostSnap.data!.docs) {
+                          final h = doc.data() as Map<String, dynamic>;
+                          final String hostId = doc.id;
+                          final String netName = (h['network_name'] ?? hostId).toString();
+                          final int dueYer = ((h['amount_due_yer'] ?? 0) as num).toInt();
+                          final num wanMb = (h['current_month_wan_mb'] ?? 0) as num;
+                          final bool autoTransfer = (h['auto_transfer_to_wallet'] ?? false) == true;
 
-                            return Container(
+                          hostCards.add(
+                            Container(
                               margin: const EdgeInsets.only(bottom: 16),
                               padding: const EdgeInsets.all(16),
                               decoration: BoxDecoration(
@@ -2265,8 +2249,12 @@ jobs:
                                   ),
                                 ],
                               ),
-                            );
-                          }).toList(),
+                            ),
+                          );
+                        }
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: hostCards,
                         );
                       },
                     ),
@@ -2359,6 +2347,9 @@ jobs:
 
       - name: Install Flutter Dependencies
         run: flutter pub get
+
+      - name: Verify Dart Syntax
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build Release APK
         run: flutter build apk --release --no-shrink
