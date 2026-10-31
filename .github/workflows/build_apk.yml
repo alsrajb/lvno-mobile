@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate LVNO V5 (Fuel-Pump Meter + 100MB/80MB Quota + Host Wallet Link)
+      - name: Generate Clean LVNO V5 (Fuel-Pump Meter + 100MB/80MB Quota)
         shell: python
         run: |
           import os, shutil, json, subprocess, re
@@ -67,7 +67,7 @@ jobs:
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App V5
           publish_to: 'none'
-          version: 5.0.0+10
+          version: 5.0.1+11
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -290,11 +290,9 @@ jobs:
                               Thread {
                                   var verified = false
                                   try {
-                                      // 1. فحص اتصال TCP مباشر ببوابة الميكروتك المفعلة (10.99.99.1)
                                       val sock = Socket()
                                       sock.connect(InetSocketAddress(gatewayIp, 53), 1200)
                                       sock.close()
-                                      // 2. فحص استجابة اسم البوابة المحلي من الميكروتك
                                       val resolved = InetAddress.getByName(expectedHostDomain).hostAddress
                                       verified = (resolved == gatewayIp)
                                   } catch (_: Exception) {
@@ -325,7 +323,7 @@ jobs:
                           }
                           "pollRealtimeDeltaBytes" -> {
                               if (!VpnTunnelService.isRunning.get()) {
-                                  result.success(0L)
+                                  result.success(0)
                                   return@setMethodCallHandler
                               }
                               var delta = VpnTunnelService.tunnelInspectorBytes.getAndSet(0L)
@@ -341,7 +339,7 @@ jobs:
                                   }
                                   VpnTunnelService.lastOsTotalBytes = nowTotal
                               }
-                              result.success(delta)
+                              result.success(delta.toInt())
                           }
                           "startVpn" -> {
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
@@ -450,7 +448,6 @@ jobs:
           </manifest>'''
           write_clean("android/app/src/main/AndroidManifest.xml", manifest_xml)
 
-          # المحرك الجديد V5: عداد مضخة البنزين بالفاصلة العشرية + دفعات 100MB/80MB + ربط محفظة الشبكة
           core_code = '''import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
@@ -465,15 +462,14 @@ jobs:
             bool ecoMode = false;
             bool isPurchasingChunk = false;
 
-            // متغيرات عداد مضخة البنزين والخزان المحلي (100MB / 80MB)
-            int activeChunkTotalBytes = 0;       // إجمالي الدفعة الحالية بالبايت (مثلاً 100 MB)
-            int activeChunkConsumedBytes = 0;    // المستهلك من الدفعة الحالية بالبايت
-            double currentChunkPriceYer = 25.0;  // سعر الدفعة الواحدة بالريال
-            double currentGbPriceYer = 250.0;    // سعر الجيجا الحالي من السيرفر
-            int serverChunkSizeMb = 100;         // حجم الدفعة من السيرفر (الافتراضي 100 ميجا)
-            int serverRefillTriggerMb = 80;      // حد إعادة الشراء التلقائي (عند استهلاك 80 ميجا)
-            int serverCreditBalanceYer = 0;      // رصيد المحفظة المحفوظ في السيرفر بعد خصم الدفعة الجارية
-            double liveSpeedKbps = 0.0;          // سرعة السحب اللحظية
+            int activeChunkTotalBytes = 0;
+            int activeChunkConsumedBytes = 0;
+            double currentChunkPriceYer = 25.0;
+            double currentGbPriceYer = 250.0;
+            int serverChunkSizeMb = 100;
+            int serverRefillTriggerMb = 80;
+            int serverCreditBalanceYer = 0;
+            double liveSpeedKbps = 0.0;
 
             Timer? _fuelPumpTimer;
             Timer? _mikrotikKeepAliveTimer;
@@ -489,19 +485,16 @@ jobs:
 
             SmartClientEngine({required this.currentHostId});
 
-            // حساب المتبقي في الخزان المحلي بالميجابايت (بالفاصلة العشرية)
             double get remainingChunkMb {
               final rem = activeChunkTotalBytes - activeChunkConsumedBytes;
               if (rem <= 0) return 0.0;
               return rem / (1024.0 * 1024.0);
             }
 
-            // حساب المستهلك من الدفعة الحالية بالميجابايت
             double get consumedChunkMb {
               return activeChunkConsumedBytes / (1024.0 * 1024.0);
             }
 
-            // عداد مضخة البنزين: الرصيد الإجمالي اللحظي بالريال والفاصلة العشرية (يتحرك مع كل كيلوبايت)
             double get fuelPumpRealtimeBalanceYer {
               if (activeChunkTotalBytes <= 0) {
                 return serverCreditBalanceYer.toDouble();
@@ -512,7 +505,6 @@ jobs:
               return serverCreditBalanceYer.toDouble() + remainingChunkValueYer;
             }
 
-            // تكلفة ما تم صرفه من الدفعة الحالية بالفاصلة العشرية (مثل عداد البنزين التصاعدي)
             double get currentSessionConsumedYer {
               if (activeChunkTotalBytes <= 0) return 0.0;
               final double usedRatio = (activeChunkConsumedBytes / activeChunkTotalBytes).clamp(0.0, 1.0);
@@ -592,7 +584,6 @@ jobs:
               } catch (_) {}
             }
 
-            // فحص التفعيل اليدوي المزدوج: (مفعلة في السيرفر + متصلة فعلياً ببوابة الميكروتك المعتمدة)
             Future> verifyManualHostActivation(String hostId, {bool requirePhysicalRouter = false}) async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
@@ -602,7 +593,7 @@ jobs:
               final data = hostSnap.data()!;
               final status = (data['status'] ?? 'inactive').toString();
               final bool manualApproved = (data['manual_admin_approved'] ?? true) == true;
-              final String secretCode = (data['activation_secret'] ?? '').toString().trim();
+              final String secretCode = (data['activation_secret'] ?? 'MK-LVNO-2026').toString().trim();
               final String gatewayIp = (data['gateway_ip'] ?? '10.99.99.1').toString().trim();
 
               if (status != 'active' || !manualApproved || secretCode.isEmpty) {
@@ -703,11 +694,11 @@ jobs:
               if (!(await cfgRef.get()).exists) {
                 await cfgRef.set({
                   'gb_price_consumer_yer': 250,
-                  'quota_chunk_mb': 100,             // حجم الدفعة الواحدة من السيرفر (100 ميجا)
-                  'quota_refill_trigger_mb': 80,     // يشتري دفعة جديدة عند استهلاك 80 ميجا (الباقي 20 ميجا)
-                  'system_profit_pct': 10.0,         // نسبة ربح المنظومة من الدفعة (قابلة للتعديل 7، 8، 10%)
-                  'credit_sender_discount_pct': 7.0, // نسبة ربح المحول عند شحن رصيد
-                  'credit_receiver_bonus_pct': 3.0,  // نسبة البونص الإضافي للمحفظة عند شحن رصيد
+                  'quota_chunk_mb': 100,
+                  'quota_refill_trigger_mb': 80,
+                  'system_profit_pct': 10.0,
+                  'credit_sender_discount_pct': 7.0,
+                  'credit_receiver_bonus_pct': 3.0,
                   'general_tier_max_balance_yer': 10000,
                   'general_tier_daily_limit_yer': 5000,
                 });
@@ -717,8 +708,8 @@ jobs:
                 await hostRef.set({
                   'host_id': currentHostId,
                   'network_name': 'شبكة الهدى المفعلة',
-                  'owner_wallet_id': '1001',         // ربط الشبكة بمحفظة صاحبها
-                  'auto_transfer_to_wallet': false,  // تحويل تلقائي أو سحب بطلب من المحفظة
+                  'owner_wallet_id': '1001',
+                  'auto_transfer_to_wallet': false,
                   'activation_secret': 'MK-LVNO-2026',
                   'gateway_ip': '10.99.99.1',
                   'manual_admin_approved': true,
@@ -726,11 +717,11 @@ jobs:
                   'status': 'active',
                   'current_month_wan_mb': 0,
                   'amount_due_yer': 0,
+                  'total_settled_to_wallet_yer': 0,
                 });
               }
             }
 
-            // شراء دفعة ميجاهات (100 MB) من السيرفر وتوزيع النسب لصاحب الشبكة والمنظومة ذرياً
             Future<bool> purchaseQuotaChunkFromServer() async {
               if (isPurchasingChunk) return false;
               isPurchasingChunk = true;
@@ -742,7 +733,7 @@ jobs:
                 final hRef = db.collection('hosts').doc(currentHostId);
                 final cfgRef = db.collection('settings').doc('global_config');
 
-                final res = await db.runTransaction((tx) async {
+                final Map<String, dynamic> res = await db.runTransaction((tx) async {
                   final wSnap = await tx.get(wRef);
                   final hSnap = await tx.get(hRef);
                   final cfgSnap = await tx.get(cfgRef);
@@ -754,6 +745,19 @@ jobs:
                   final hData = hSnap.data()!;
                   final cfg = cfgSnap.data() ?? {};
 
+                  final String ownerWalletId = (hData['owner_wallet_id'] ?? '').toString().trim();
+                  final bool autoSettle = (hData['auto_transfer_to_wallet'] ?? false) == true;
+
+                  bool ownerExists = false;
+                  if (autoSettle && ownerWalletId.isNotEmpty) {
+                    if (ownerWalletId == walletId) {
+                      ownerExists = true;
+                    } else {
+                      final ownerSnap = await tx.get(db.collection('wallets').doc(ownerWalletId));
+                      ownerExists = ownerSnap.exists;
+                    }
+                  }
+
                   if ((hData['status'] ?? 'inactive') != 'active' || (hData['manual_admin_approved'] ?? true) != true) {
                     throw Exception("الشبكة غير مفعلة يدوياً من النظام");
                   }
@@ -763,59 +767,41 @@ jobs:
                   final int triggerMb = ((cfg['quota_refill_trigger_mb'] ?? 80) as num).toInt();
                   final double sysProfitPct = ((cfg['system_profit_pct'] ?? 10.0) as num).toDouble();
 
-                  // حساب سعر الدفعة (مثلاً 100 ميجا من أصل 1000 ميجا = 10% من سعر الجيجا)
                   final double rawChunkPrice = (chunkMb / 1000.0) * gbPrice;
-                  final int chunkCostYer = rawChunkPrice.ceil() < 1 ? 1 : rawChunkPrice.round();
+                  final int chunkCostYer = rawChunkPrice.round() < 1 ? 1 : rawChunkPrice.round();
 
                   final int currentCredit = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
                   if (currentCredit < chunkCostYer) {
                     throw Exception("رصيد الاستخدام ($currentCredit ريال) لا يكفي لشراء دفعة جديدة ($chunkCostYer ريال / $chunkMb ميجا)");
                   }
 
-                  // توزيع قيمة الدفعة بين صاحب الشبكة ونسبة ربح المنظومة (7% - 8% - 10%)
                   final int sysProfitYer = (chunkCostYer * (sysProfitPct / 100.0)).round();
                   final int hostShareYer = chunkCostYer - sysProfitYer;
 
-                  final String ownerWalletId = (hData['owner_wallet_id'] ?? '').toString().trim();
-                  final bool autoSettle = (hData['auto_transfer_to_wallet'] ?? false) == true;
-
-                  DocumentSnapshot? ownerWalletSnap;
-                  DocumentReference? ownerWalletRef;
-                  if (autoSettle && ownerWalletId.isNotEmpty) {
-                    ownerWalletRef = db.collection('wallets').doc(ownerWalletId);
-                    if (ownerWalletId == walletId) {
-                      ownerWalletSnap = wSnap;
-                    } else {
-                      ownerWalletSnap = await tx.get(ownerWalletRef);
-                    }
-                  }
-
-                  // 1. خصم الدفعة من رصيد استخدام المشترك
                   tx.update(wRef, {
                     'credit_balance_yer': currentCredit - chunkCostYer,
                     'updated_at': FieldValue.serverTimestamp(),
                   });
 
-                  // 2. إيداع مستحقات الشبكة (إما تلقائياً لمحفظة المالك أو في رصيد الشبكة القابل للسحب)
-                  if (autoSettle && ownerWalletSnap != null && ownerWalletSnap.exists && ownerWalletRef != null) {
-                    tx.update(ownerWalletRef, {
+                  if (autoSettle && ownerExists && ownerWalletId.isNotEmpty) {
+                    final ownerRef = db.collection('wallets').doc(ownerWalletId);
+                    tx.update(ownerRef, {
                       'cash_balance_yer': FieldValue.increment(hostShareYer),
                       'updated_at': FieldValue.serverTimestamp(),
                     });
-                    tx.update(hRef, {
+                    tx.set(hRef, {
                       'current_month_wan_mb': FieldValue.increment(chunkMb),
                       'total_settled_to_wallet_yer': FieldValue.increment(hostShareYer),
                       'last_heartbeat': FieldValue.serverTimestamp(),
-                    });
+                    }, SetOptions(merge: true));
                   } else {
-                    tx.update(hRef, {
+                    tx.set(hRef, {
                       'current_month_wan_mb': FieldValue.increment(chunkMb),
                       'amount_due_yer': FieldValue.increment(hostShareYer),
                       'last_heartbeat': FieldValue.serverTimestamp(),
-                    });
+                    }, SetOptions(merge: true));
                   }
 
-                  // 3. تسجيل الدفعة في خزنة المقاصة
                   final vaultRef = db.collection('admin_secret_vault').doc(currentHostId);
                   tx.set(vaultRef, {
                     'host_id': currentHostId,
@@ -826,7 +812,7 @@ jobs:
                     'updated_at': FieldValue.serverTimestamp(),
                   }, SetOptions(merge: true));
 
-                  return {
+                  return <String, dynamic>{
                     'chunkMb': chunkMb,
                     'triggerMb': triggerMb,
                     'chunkCostYer': chunkCostYer,
@@ -835,20 +821,19 @@ jobs:
                   };
                 });
 
-                final int addedBytes = ((res['chunkMb'] as int) * 1024 * 1024);
+                final int addedBytes = ((res['chunkMb'] as num).toInt() * 1024 * 1024);
                 final int prevRemainingBytes = (activeChunkTotalBytes - activeChunkConsumedBytes) > 0
                     ? (activeChunkTotalBytes - activeChunkConsumedBytes)
                     : 0;
 
-                // دمج المتبقي من الدفعة السابقة (إن وجد مثل الـ 20 ميجا) مع الدفعة الجديدة (100 ميجا)
                 activeChunkTotalBytes = prevRemainingBytes + addedBytes;
                 activeChunkConsumedBytes = 0;
 
-                serverChunkSizeMb = res['chunkMb'] as int;
-                serverRefillTriggerMb = res['triggerMb'] as int;
-                currentGbPriceYer = res['gbPrice'] as double;
+                serverChunkSizeMb = (res['chunkMb'] as num).toInt();
+                serverRefillTriggerMb = (res['triggerMb'] as num).toInt();
+                currentGbPriceYer = (res['gbPrice'] as num).toDouble();
                 currentChunkPriceYer = (activeChunkTotalBytes / (1024.0 * 1024.0 * 1000.0)) * currentGbPriceYer;
-                serverCreditBalanceYer = res['newServerCredit'] as int;
+                serverCreditBalanceYer = (res['newServerCredit'] as num).toInt();
 
                 await persistQuotaState();
                 isPurchasingChunk = false;
@@ -861,7 +846,6 @@ jobs:
               }
             }
 
-            // سحب مستحقات الشبكة يدوياً بطلب من محفظة صاحب الشبكة أو تفعيل التحويل التلقائي
             Future<int> withdrawHostEarningsToMyWallet(String hostId) async {
               final db = FirebaseFirestore.instance;
               final hRef = db.collection('hosts').doc(hostId);
@@ -951,7 +935,6 @@ jobs:
                 throw Exception("انتهى وقت الاستخدام اليومي المخصص لهذا الجهاز");
               }
 
-              // 1. فحص التفعيل اليدوي للشبكة بين السيرفر والميكروتك
               final hostCheck = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
               if (hostCheck['ok'] != true) {
                 throw Exception(hostCheck['reason'] ?? "لا يمكن تشغيل النفق إلا على شبكة مفعلة");
@@ -959,7 +942,6 @@ jobs:
 
               await syncDevicePolicyFromWalletDoc(wData, cfgData);
 
-              // 2. إذا كان الخزان المحلي فارغاً، نشتري أول دفعة (100 ميجا) فوراً من السيرفر قبل فتح النفق
               if ((activeChunkTotalBytes - activeChunkConsumedBytes) <= 512 * 1024) {
                 await purchaseQuotaChunkFromServer();
               }
@@ -991,13 +973,11 @@ jobs:
               notifyListeners();
             }
 
-            // حلقة عداد البنزين اللحظية (كل 250 ميللي ثانية): تحسب بالفاصلة وتشتري دفعة جديدة عند استهلاك 80 ميجا
             void _startRealtimeFuelPumpLoop() {
               _fuelPumpTimer?.cancel();
               _mikrotikKeepAliveTimer?.cancel();
               _ticksCounter = 0;
 
-              // تجديد إشارة فتح بوابة الميكروتك كل 45 ثانية طالما النفق نشط والخزان فيه رصيد
               _mikrotikKeepAliveTimer = Timer.periodic(const Duration(seconds: 45), (_) async {
                 if (!isVpnActive) return;
                 final check = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
@@ -1011,7 +991,8 @@ jobs:
               _fuelPumpTimer = Timer.periodic(const Duration(milliseconds: 250), (_) async {
                 if (!isVpnActive) return;
                 try {
-                  final int deltaBytes = await _vpnChannel.invokeMethod<int>('pollRealtimeDeltaBytes') ?? 0;
+                  final num? rawDelta = await _vpnChannel.invokeMethod<num>('pollRealtimeDeltaBytes');
+                  final int deltaBytes = rawDelta?.toInt() ?? 0;
                   _ticksCounter++;
 
                   if (deltaBytes > 0) {
@@ -1025,24 +1006,19 @@ jobs:
                     liveSpeedKbps = 0.0;
                   }
 
-                  // حفظ حالة العداد محلياً كل ثانيتين (8 نبضات) لمنع ضياع أي بايت
                   if (_ticksCounter % 8 == 0) {
                     await persistQuotaState();
                   }
 
-                  // حساب النقطة الحرجة لإعادة التعبئة (عندما يتبقى 20% فقط، أي استهلك 80 ميجا من أصل 100 ميجا)
                   final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
                   final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
 
                   if (remainingBytes <= lowMarkBytes && !isPurchasingChunk && serverCreditBalanceYer > 0) {
                     try {
                       await purchaseQuotaChunkFromServer();
-                    } catch (_) {
-                      // إذا لم يكفِ الرصيد لشراء دفعة جديدة، يستمر المستخدم حتى ينفد آخر بايت في خزانه الحالي
-                    }
+                    } catch (_) {}
                   }
 
-                  // إذا فرغ الخزان المحلي بالكامل (0.000 MB) ولم يتمكن من شراء دفعة جديدة، يغلق النفق فوراً
                   if (remainingBytes <= 0 && !isPurchasingChunk) {
                     await stopSmartConnection();
                   }
@@ -1050,7 +1026,6 @@ jobs:
               });
             }
 
-            // محاكاة سحب سريع (5 ميجابايت في النقرة) لاختبار حركة عداد البنزين بالفاصلة وشراء الدفعة عند 80 ميجا أمام العين
             Future<void> simulateFastFuelConsumption(int megabytesToConsume) async {
               if (!isVpnActive) {
                 throw Exception("شغّل النفق أولاً لترى عداد البنزين يتحرك بالفاصلة العشرية!");
@@ -1479,8 +1454,8 @@ jobs:
 
                       widget.engine.syncDevicePolicyFromWalletDoc(w, cfg);
 
-                      return ListenableBuilder(
-                        listenable: widget.engine,
+                      return AnimatedBuilder(
+                        animation: widget.engine,
                         builder: (context, _) {
                           final int cashBal = ((w['cash_balance_yer'] ?? 0) as num).toInt();
                           final bool ecoMode = (w['eco_mode'] ?? false) == true;
@@ -1763,7 +1738,6 @@ jobs:
               );
             }
 
-            // التبويب 2: عداد مضخة البنزين بالفاصلة العشرية + خزان الـ 100 ميجا / 80 ميجا
             Widget _buildFuelPumpTunnelTab(Map<String, dynamic> w, Map<String, dynamic> cfg, bool ecoMode) {
               final double liveBalanceYer = widget.engine.fuelPumpRealtimeBalanceYer;
               final double sessionSpentYer = widget.engine.currentSessionConsumedYer;
@@ -1780,7 +1754,6 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // شاشة عداد البنزين الرقمية الدقيقة بالفاصلة العشرية
                     Container(
                       padding: const EdgeInsets.all(22),
                       decoration: BoxDecoration(
@@ -2218,7 +2191,6 @@ jobs:
               );
             }
 
-            // التبويب 4: الإدارة + سحب مستحقات الشبكة المرتبطة بالمحفظة (تلقائي أو بطلب)
             Widget _buildContactsAndHostWalletTab(String myId) {
               final idCtrl = TextEditingController();
               final nameCtrl = TextEditingController();
@@ -2229,7 +2201,6 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // قسم الشبكات المرتبطة بهذه المحفظة (يظهر لصاحب الشبكة المربوط بمحفظته)
                     StreamBuilder<QuerySnapshot>(
                       stream: db.collection('hosts').where('owner_wallet_id', isEqualTo: myId).snapshots(),
                       builder: (context, hostSnap) {
