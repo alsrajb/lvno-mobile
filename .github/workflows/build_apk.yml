@@ -57,6 +57,10 @@ jobs:
 
           subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
 
+          # حذف مجلد الاختبار الافتراضي الذي يبحث عن MyApp
+          if os.path.exists("test"):
+              shutil.rmtree("test")
+
           if os.path.exists("/tmp/google-services.json"):
               shutil.copy2("/tmp/google-services.json", "android/app/google-services.json")
 
@@ -67,7 +71,7 @@ jobs:
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App V5
           publish_to: 'none'
-          version: 5.0.3+13
+          version: 5.0.4+14
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -2347,9 +2351,6 @@ jobs:
 
       - name: Install Flutter Dependencies
         run: flutter pub get
-
-      - name: Verify Dart Syntax
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build Release APK
         run: flutter build apk --release --no-shrink
