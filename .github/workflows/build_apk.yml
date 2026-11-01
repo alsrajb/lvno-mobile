@@ -498,7 +498,7 @@ jobs:
 
           print("PART1_DONE_ANDROID_NATIVE_READY")
           core_code = '''
-		  import 'dart:async';
+          import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
           import 'dart:math';
@@ -3849,7 +3849,7 @@ jobs:
           main_clean = main_clean.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           open("lib/main.dart", "w", encoding="utf-8").write(main_clean)
           print("PART5_DONE_MAIN_DART_FULL")
-		  # ============ GRADLE MODIFICATIONS ============
+          # ============ GRADLE MODIFICATIONS ============
           for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(app_g):
                   txt = open(app_g).read()
