@@ -497,7 +497,7 @@ jobs:
           write_clean("android/app/src/main/AndroidManifest.xml", manifest_xml)
 
           print("PART1_DONE_ANDROID_NATIVE_READY")
-		  core_code = '''
+          core_code = '''
 		  import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
@@ -1757,7 +1757,7 @@ jobs:
           }'''
           write_clean("lib/smart_client_core.dart", core_code)
           print("PART3_DONE_CORE_DART_FULL")
-		  main_code = '''import 'package:flutter/material.dart';
+          main_code = '''import 'package:flutter/material.dart';
           import 'package:firebase_core/firebase_core.dart';
           import 'package:firebase_auth/firebase_auth.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
