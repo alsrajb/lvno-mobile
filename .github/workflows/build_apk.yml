@@ -27,7 +27,7 @@ jobs:
       - name: Generate LVNO SmartClient V10 (Full + Security + DNS)
         shell: python
         run: |
-          import os, shutil, json, subprocess, re
+          import os, shutil, json, subprocess, re, textwrap
 
           gs_data = {}
           for root, dirs, files in os.walk("."):
@@ -37,7 +37,8 @@ jobs:
                       full_p = os.path.join(root, f)
                       shutil.copy2(full_p, "/tmp/google-services.json")
                       try:
-                          gs_data = json.load(open(full_p))
+                          with open(full_p, "r", encoding="utf-8") as gf:
+                              gs_data = json.load(gf)
                       except Exception:
                           pass
 
@@ -64,10 +65,12 @@ jobs:
               shutil.copy2("/tmp/google-services.json", "android/app/google-services.json")
 
           def write_clean(path, text):
-              lines = [l[10:] if l.startswith("          ") else l for l in text.splitlines()]
-              open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+              cleaned = textwrap.dedent(text).strip() + "\n"
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(cleaned)
 
-          pubspec_txt = '''name: smartclient
+          pubspec_txt = '''
+          name: smartclient
           description: LVNO SmartClient V10 - Portable Quota + Sessions + Security
           publish_to: 'none'
           version: 6.0.0+20
@@ -87,13 +90,15 @@ jobs:
             mobile_scanner: ^5.2.3
 
           flutter:
-            uses-material-design: true'''
+            uses-material-design: true
+          '''
           write_clean("pubspec.yaml", pubspec_txt)
 
           kt_dir = "android/app/src/main/kotlin/com/lvno/smartclient"
           os.makedirs(kt_dir, exist_ok=True)
 
-          vpn_kt = '''package com.lvno.smartclient
+          vpn_kt = '''
+          package com.lvno.smartclient
 
           import android.content.Intent
           import android.net.TrafficStats
@@ -219,10 +224,12 @@ jobs:
                   stopVpnTunnel()
                   super.onDestroy()
               }
-          }'''
+          }
+          '''
           write_clean(os.path.join(kt_dir, "VpnTunnelService.kt"), vpn_kt)
 
-          main_act_kt = '''package com.lvno.smartclient
+          main_act_kt = '''
+          package com.lvno.smartclient
 
           import android.app.Activity
           import android.content.Context
@@ -448,10 +455,12 @@ jobs:
                       pendingQrResult = null
                   }
               }
-          }'''
+          }
+          '''
           write_clean(os.path.join(kt_dir, "MainActivity.kt"), main_act_kt)
 
-          manifest_xml = '''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          manifest_xml = '''
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
@@ -493,10 +502,12 @@ jobs:
 
                   <meta-data android:name="flutterEmbedding" android:value="2" />
               </application>
-          </manifest>'''
+          </manifest>
+          '''
           write_clean("android/app/src/main/AndroidManifest.xml", manifest_xml)
 
           print("PART1_DONE_ANDROID_NATIVE_READY")
+
           core_code = '''
           import 'dart:async';
           import 'dart:convert';
@@ -579,8 +590,7 @@ jobs:
               return usedRatio * currentChunkPriceYer;
             }
 
-            // ============ DEVICE FINGERPRINT ============
-            Future<Map<String, String>> getDeviceFingerprint() async {
+            Future> getDeviceFingerprint() async {
               String androidId = "dev_default_01";
               Map<String, String> devInfo = {};
 
@@ -590,7 +600,7 @@ jobs:
               } catch (_) {}
 
               try {
-                final info = await _vpnChannel.invokeMethod<Map>('getDeviceInfo');
+                final info = await _vpnChannel.invokeMethod('getDeviceInfo');
                 if (info != null) {
                   devInfo = info.map((k, v) => MapEntry(k.toString(), v.toString()));
                 }
@@ -620,7 +630,6 @@ jobs:
               }
             }
 
-            // ============ QUOTA STATE (LOCAL PERSISTENCE) ============
             Future<void> loadSavedQuotaState() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getQuotaStateJson') ?? '{}';
@@ -645,8 +654,7 @@ jobs:
               } catch (_) {}
             }
 
-            // ============ LOCAL CONTACTS ============
-            Future<Map<String, String>> getLocalContacts() async {
+            Future> getLocalContacts() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
                 final Map<String, dynamic> decoded = jsonDecode(raw);
@@ -688,8 +696,7 @@ jobs:
               } catch (_) {}
             }
 
-            // ============ HOST ROUTING CONFIG ============
-            Future<Map<String, dynamic>> getHostRoutingConfig() async {
+            Future> getHostRoutingConfig() async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(currentHostId).get();
               if (!hostSnap.exists) return {};
@@ -703,8 +710,7 @@ jobs:
               };
             }
 
-            // ============ HOST ACTIVATION (MANDATORY PHYSICAL CHECK) ============
-            Future<Map<String, dynamic>> verifyManualHostActivation(
+            Future> verifyManualHostActivation(
                 String hostId, {bool requirePhysicalRouter = false}) async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
@@ -725,7 +731,6 @@ jobs:
                 return {'ok': false, 'reason': '⛔ الشبكة غير مهيأة (بوابة أو منفذ ناقص)'};
               }
 
-              // ✅ MANDATORY PHYSICAL CHECK — NO FLAG
               if (requirePhysicalRouter) {
                 final String currentGateway =
                     await _vpnChannel.invokeMethod<String>('getCurrentGatewayIp') ?? '';
@@ -739,7 +744,7 @@ jobs:
                   };
                 }
 
-                final Map<dynamic, dynamic> idResult = await _vpnChannel.invokeMethod<Map>(
+                final Map<dynamic, dynamic> idResult = await _vpnChannel.invokeMethod(
                   'verifyMikroTikIdentity',
                   {'gatewayIp': expectedGateway, 'customApiPort': customApiPort},
                 ) ?? {};
@@ -757,7 +762,6 @@ jobs:
               return {'ok': true, 'data': data};
             }
 
-            // ============ DEVICE / WALLET REGISTRATION ============
             Future<String> registerOrRecoverDeviceWallet() async {
               final db = FirebaseFirestore.instance;
               final fp = await getDeviceFingerprint();
@@ -765,7 +769,6 @@ jobs:
               await _ensureDefaultSystemSettings(db);
               await loadSavedQuotaState();
 
-              // ✅ MANDATORY PHYSICAL CHECK
               final check = await verifyManualHostActivation(currentHostId, requirePhysicalRouter: true);
               if (check['ok'] != true) {
                 throw Exception(check['reason'] ?? "الشبكة غير مفعلة");
@@ -779,7 +782,6 @@ jobs:
                 final devSnap = await tx.get(devRef);
                 if (devSnap.exists && devSnap.data()?['wallet_id'] != null) {
                   walletId = devSnap.data()!['wallet_id'].toString();
-                  // ✅ update fingerprint on each launch
                   tx.set(devRef, {
                     'model': fp['model'],
                     'manufacturer': fp['manufacturer'],
@@ -897,7 +899,7 @@ jobs:
                   'manual_admin_approved': true,
                   'enforce_physical_router_check': true,
                   'status': 'active',
-                  'current_month_wan_mb': 0,
+                  'current_month_wan_mb': 0.0,
                   'amount_due_yer': 0,
                   'total_settled_to_wallet_yer': 0,
                   'routing_preference': 'host_wan',
@@ -908,8 +910,7 @@ jobs:
               }
             }
 
-            // ============ SESSION MANAGEMENT ============
-            Future<Map<String, dynamic>> startSession() async {
+            Future> startSession() async {
               if (isStartingSession) return {'ok': false, 'reason': 'عملية جارية'};
               isStartingSession = true;
 
@@ -930,7 +931,6 @@ jobs:
                     throw Exception("الرصيد العائم فارغ — اشترِ دفعة أولاً");
                   }
 
-                  // create session
                   final sRef = db.collection('sessions').doc(sessionId);
                   tx.set(sRef, {
                     'wallet_id': walletId,
@@ -945,7 +945,6 @@ jobs:
                     'status': 'active',
                   });
 
-                  // update wallet
                   tx.update(wRef, {
                     'current_session_id': sessionId,
                     'current_host_id': currentHostId,
@@ -1020,12 +1019,10 @@ jobs:
                   final currentPortable = ((w['portable_mb'] ?? 0) as num).toDouble();
                   final currentPortableVal = ((w['portable_value_yer'] ?? 0) as num).toDouble();
 
-                  // الحماية: لا نستهلك أكثر من المتاح
                   final actualMb = mbConsumed > currentPortable ? currentPortable : mbConsumed;
 
                   if (actualMb < 0.01) return;
 
-                  // 1) خصم من العائم + زيادة العداد التراكمي
                   tx.update(wRef, {
                     'portable_mb': currentPortable - actualMb,
                     'portable_value_yer': currentPortableVal - mbCostInt,
@@ -1034,19 +1031,16 @@ jobs:
                     'updated_at': FieldValue.serverTimestamp(),
                   });
 
-                  // 2) دفع لصاحب الشبكة الحالية
                   tx.set(hRef, {
                     'current_month_wan_mb': FieldValue.increment(actualMb),
                     'amount_due_yer': FieldValue.increment(hostShare),
                     'last_heartbeat': FieldValue.serverTimestamp(),
                   }, SetOptions(merge: true));
 
-                  // 3) ربح النظام
                   tx.set(db.collection('admin_secret_vault').doc('system_income'), {
                     'total_sys_profit_yer': FieldValue.increment(sysShare),
                   }, SetOptions(merge: true));
 
-                  // 4) سجل العملية
                   final txRef = db.collection('transactions').doc();
                   tx.set(txRef, {
                     'type': 'consumption',
@@ -1062,7 +1056,6 @@ jobs:
                     'timestamp': FieldValue.serverTimestamp(),
                   });
 
-                  // 5) تحديث الجلسة
                   tx.update(sRef, {
                     'reported_mb': FieldValue.increment(actualMb),
                     'local_mb_since_report': 0.0,
@@ -1074,7 +1067,6 @@ jobs:
                 _pendingMbReport = 0;
                 _ticksSinceReport = 0;
               } catch (_) {
-                // إعادة المحاولة في الدورة التالية
               } finally {
                 isReporting = false;
               }
@@ -1083,7 +1075,6 @@ jobs:
             Future<void> closeSession({String reason = 'user_stop'}) async {
               if (currentSessionId.isEmpty) return;
               try {
-                // أرسل أي استهلاك متبقٍ
                 if (_pendingMbReport >= 0.1) {
                   await reportConsumption(_pendingMbReport, trigger: 'session_close');
                 }
@@ -1115,7 +1106,6 @@ jobs:
               } catch (_) {}
             }
 
-            // ============ TAMPER DETECTION ============
             Future<void> detectTamperOnBoot() async {
               try {
                 final db = FirebaseFirestore.instance;
@@ -1128,7 +1118,6 @@ jobs:
 
                 final sSnap = await db.collection('sessions').doc(staleSessionId).get();
                 if (!sSnap.exists) {
-                  // الجلسة غير موجودة لكن المحفظة تشير لها — تنظيف
                   await db.collection('wallets').doc(walletId).update({
                     'current_session_id': '',
                     'current_host_id': '',
@@ -1140,13 +1129,12 @@ jobs:
                 final s = sSnap.data()!;
                 if (s['status'] != 'active') return;
 
-                final lastHb = s['last_heartbeat']?.toDate?.() as DateTime?;
+                final Timestamp? rawHb = s['last_heartbeat'] as Timestamp?;
+                final DateTime? lastHb = rawHb?.toDate();
                 final pendingMb = ((s['local_mb_since_report'] ?? 0) as num).toDouble();
 
-                // إذا كان آخر heartbeat قديم > 2 دقيقة → تسوية
                 if (lastHb != null && DateTime.now().difference(lastHb).inMinutes >= 2) {
                   if (pendingMb > 0.1) {
-                    // نرسل تسوية إجبارية
                     await _forceSettleStaleSession(staleSessionId, s, pendingMb);
                   }
                   await db.collection('sessions').doc(staleSessionId).update({
@@ -1160,7 +1148,6 @@ jobs:
                     'pending_mb_since_report': 0.0,
                   });
 
-                  // سجّل تنبيه أمني
                   await db.collection('alerts').add({
                     'type': 'stale_session',
                     'wallet_id': walletId,
@@ -1209,7 +1196,7 @@ jobs:
                 });
               } catch (_) {}
             }
-            // ============ PURCHASE PORTABLE QUOTA ============
+
             Future<bool> purchasePortableQuota() async {
               if (isPurchasingChunk) return false;
               isPurchasingChunk = true;
@@ -1253,15 +1240,13 @@ jobs:
                     throw Exception("رصيد الاستخدام ($currentCredit ريال) لا يكفي لشراء دفعة ($chunkCostYer ريال)");
                   }
 
-                  // خصم من credit + إضافة للـ portable (رصيد عائم)
                   tx.update(wRef, {
                     'credit_balance_yer': currentCredit - chunkCostYer,
-                    'portable_mb': FieldValue.increment(chunkMb),
-                    'portable_value_yer': FieldValue.increment(chunkCostYer),
+                    'portable_mb': FieldValue.increment(chunkMb.toDouble()),
+                    'portable_value_yer': FieldValue.increment(chunkCostYer.toDouble()),
                     'updated_at': FieldValue.serverTimestamp(),
                   });
 
-                  // سجل الشراء (بدون host — عائم)
                   final txRec = db.collection('transactions').doc();
                   tx.set(txRec, {
                     'type': 'portable_purchase',
@@ -1310,7 +1295,6 @@ jobs:
               }
             }
 
-            // ============ HOST WITHDRAWAL ============
             Future<int> withdrawHostEarningsToMyWallet(String hostId) async {
               final db = FirebaseFirestore.instance;
               final hRef = db.collection('hosts').doc(hostId);
@@ -1348,14 +1332,12 @@ jobs:
               });
             }
 
-            // ============ HOST AUTO TRANSFER ============
             Future<void> toggleHostAutoTransfer(String hostId, bool autoEnabled) async {
               await FirebaseFirestore.instance.collection('hosts').doc(hostId).update({
                 'auto_transfer_to_wallet': autoEnabled,
               });
             }
 
-            // ============ SYNC DEVICE POLICY ============
             Future<void> syncDevicePolicyFromWalletDoc(
                 Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
               ecoMode = (wData['eco_mode'] ?? false) == true;
@@ -1400,7 +1382,6 @@ jobs:
               } catch (_) {}
             }
 
-            // ============ START SMART CONNECTION ============
             Future<bool> startSmartConnection(
                 Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
               if ((wData['parental_locked'] ?? false) == true) {
@@ -1412,29 +1393,24 @@ jobs:
                 throw Exception("انتهى وقت الاستخدام اليومي المخصص لهذا الجهاز");
               }
 
-              // 1) ✅ التحقق الفيزيائي الإلزامي
               final hostCheck = await verifyManualHostActivation(
                   currentHostId, requirePhysicalRouter: true);
               if (hostCheck['ok'] != true) {
                 throw Exception(hostCheck['reason'] ?? "الشبكة غير معتمدة");
               }
 
-              // 2) مزامنة السياسات
               await syncDevicePolicyFromWalletDoc(wData, cfgData);
 
-              // 3) شراء دفعة إذا كان الرصيد العائم منخفضاً
               final currentPortable = ((wData['portable_mb'] ?? 0) as num).toDouble();
               if (currentPortable < 5.0) {
                 await purchasePortableQuota();
               }
 
-              // 4) بدء الجلسة
               final sessionResult = await startSession();
               if (sessionResult['ok'] != true) {
                 throw Exception(sessionResult['reason'] ?? "فشل بدء الجلسة");
               }
 
-              // 5) فتح النفق مع DNS ديناميكي
               final ok = await _vpnChannel.invokeMethod<bool>('startVpn', {
                 'ecoMode': ecoMode,
                 'dnsPrimary': cachedDnsPrimary,
@@ -1449,7 +1425,6 @@ jobs:
               return isVpnActive;
             }
 
-            // ============ STOP SMART CONNECTION ============
             Future<void> stopSmartConnection() async {
               _fuelPumpTimer?.cancel();
               _fuelPumpTimer = null;
@@ -1457,7 +1432,6 @@ jobs:
               _networkCheckTimer = null;
               liveSpeedKbps = 0.0;
 
-              // إرسال أي استهلاك متبقٍ قبل الإغلاق
               if (_pendingMbReport >= 0.1 && currentSessionId.isNotEmpty) {
                 try {
                   await reportConsumption(_pendingMbReport, trigger: 'session_close');
@@ -1467,7 +1441,6 @@ jobs:
               await persistQuotaState();
               await _knockMikroTikGateway(unlock: false, gateway: cachedGatewayIp);
 
-              // إغلاق الجلسة في السيرفر
               await closeSession(reason: 'user_stop');
 
               try {
@@ -1477,7 +1450,6 @@ jobs:
               notifyListeners();
             }
 
-            // ============ FUEL PUMP LOOP ============
             void _startRealtimeFuelPumpLoop() {
               _fuelPumpTimer?.cancel();
               _networkCheckTimer?.cancel();
@@ -1485,16 +1457,13 @@ jobs:
               _ticksSinceReport = 0;
               _ticksSinceHeartbeat = 0;
 
-              // فحص الشبكة كل 60 ثانية
               _networkCheckTimer = Timer.periodic(const Duration(seconds: 60), (_) async {
                 if (!isVpnActive) return;
                 final currentGw = await _vpnChannel.invokeMethod<String>('getCurrentGatewayIp') ?? '';
                 if (currentGw.isNotEmpty && currentGw != cachedGatewayIp) {
-                  // تغيّرت الشبكة → أغلق النفق
                   await stopSmartConnection();
                   return;
                 }
-                // أعد التحقق من صلاحية الشبكة
                 final check = await verifyManualHostActivation(
                     currentHostId, requirePhysicalRouter: true);
                 if (check['ok'] != true) {
@@ -1522,25 +1491,21 @@ jobs:
                     liveSpeedKbps = 0.0;
                   }
 
-                  // حفظ محلي كل 2 ثانية
                   if (_ticksCounter % 8 == 0) {
                     await persistQuotaState();
                   }
 
-                  // heartbeat كل 30 ثانية (120 ticks × 250ms)
                   if (_ticksSinceHeartbeat >= 120) {
                     await sendHeartbeat();
                     _ticksSinceHeartbeat = 0;
                   }
 
-                  // تقرير كل 5MB أو 30 ثانية
                   if (_pendingMbReport >= 5.0 || _ticksSinceReport >= 120) {
                     if (_pendingMbReport >= 0.1) {
                       await reportConsumption(_pendingMbReport, trigger: 'periodic');
                     }
                   }
 
-                  // شراء تلقائي قبل الفراغ
                   final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
                   final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
 
@@ -1557,7 +1522,6 @@ jobs:
               });
             }
 
-            // ============ SIMULATE (DEV) ============
             Future<void> simulateFastFuelConsumption(int megabytesToConsume) async {
               if (!isVpnActive) {
                 throw Exception("شغّل النفق أولاً لترى عداد البنزين يتحرك");
@@ -1575,7 +1539,6 @@ jobs:
               await persistQuotaState();
             }
 
-            // ============ ECO MODE ============
             Future<void> toggleMyEcoMode(bool enabled) async {
               ecoMode = enabled;
               await FirebaseFirestore.instance.collection('wallets').doc(walletId).update({
@@ -1583,7 +1546,6 @@ jobs:
               });
             }
 
-            // ============ FAMILY LINK ============
             Future<void> linkFamilyMemberDevice(String childWalletId, String localNickname) async {
               final cleanId = childWalletId.replaceAll('LINK:', '').trim();
               if (cleanId.isEmpty || cleanId == walletId) {
@@ -1606,8 +1568,7 @@ jobs:
               }
             }
 
-            // ============ UNIFIED TRANSFER ============
-            Future<Map<String, dynamic>> executeUnifiedTransfer({
+            Future> executeUnifiedTransfer({
               required String receiverId,
               required int amountYer,
               required String transferMode,
@@ -1754,10 +1715,13 @@ jobs:
 
               return result;
             }
-          }'''
+          }
+          '''
           write_clean("lib/smart_client_core.dart", core_code)
           print("PART3_DONE_CORE_DART_FULL")
-          main_code = '''import 'package:flutter/material.dart';
+
+          main_code = '''
+          import 'package:flutter/material.dart';
           import 'package:firebase_core/firebase_core.dart';
           import 'package:firebase_auth/firebase_auth.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
@@ -1920,13 +1884,8 @@ jobs:
                   }
                 } catch (_) {}
 
-                // تسجيل/استرجاع المحفظة (يتضمن التحقق الفيزيائي)
                 await _engine.registerOrRecoverDeviceWallet();
-
-                // كشف التلاعب من الجلسة السابقة
                 await _engine.detectTamperOnBoot();
-
-                // تحميل الحالة المحفوظة
                 await _engine.loadSavedQuotaState();
 
                 if (mounted) setState(() => _isReady = true);
@@ -2209,7 +2168,6 @@ jobs:
               );
             }
 
-            // ============ TAB 1: BALANCE & TRANSFER ============
             Widget _buildBalanceAndTransferTab(
                 String myId, int cashBal, bool kyc, Map<String, dynamic> w, Map<String, dynamic> cfg) {
               final filteredContacts = _localContacts.entries.where((e) {
@@ -2219,7 +2177,6 @@ jobs:
 
               final double liveCredit = widget.engine.fuelPumpRealtimeBalanceYer;
               final double portableMb = widget.engine.portableMb;
-              final double portableValue = widget.engine.portableValueYer;
               final double lifetime = widget.engine.lifetimeConsumedMb;
               final bool hasSession = widget.engine.currentSessionId.isNotEmpty;
 
@@ -2228,7 +2185,6 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Header card
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
@@ -2323,7 +2279,6 @@ jobs:
                     ),
                     const SizedBox(height: 20),
 
-                    // Transfer section
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -2451,7 +2406,6 @@ jobs:
                     ),
                     const SizedBox(height: 16),
 
-                    // Quick contacts
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -2490,9 +2444,9 @@ jobs:
                             ),
                           ...filteredContacts.map((entry) => ListTile(
                                 contentPadding: EdgeInsets.zero,
-                                leading: CircleAvatar(
+                                leading: const CircleAvatar(
                                   backgroundColor: kMandarinOrange,
-                                  child: const Icon(Icons.person, color: kBlack),
+                                  child: Icon(Icons.person, color: kBlack),
                                 ),
                                 title: Text(entry.value,
                                     style: const TextStyle(fontWeight: FontWeight.bold, color: kBlack)),
@@ -2574,7 +2528,6 @@ jobs:
               );
             }
 
-            // ============ TAB 2: FUEL PUMP TUNNEL ============
             Widget _buildFuelPumpTunnelTab(
                 Map<String, dynamic> w, Map<String, dynamic> cfg, bool ecoMode) {
               final double liveBalanceYer = widget.engine.fuelPumpRealtimeBalanceYer;
@@ -2596,7 +2549,6 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Fuel pump card
                     Container(
                       padding: const EdgeInsets.all(22),
                       decoration: BoxDecoration(
@@ -2612,7 +2564,6 @@ jobs:
                       ),
                       child: Column(
                         children: [
-                          // Status bar
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
@@ -2674,7 +2625,6 @@ jobs:
                           ),
                           const SizedBox(height: 20),
 
-                          // Live balance
                           const Text("الرصيد المتبقي اللحظي",
                               style: TextStyle(fontSize: 12, color: kSoftGray, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 8),
@@ -2691,7 +2641,7 @@ jobs:
                             child: FittedBox(
                               fit: BoxFit.scaleDown,
                               child: Text(
-                                "${liveBalanceYer.toStringAsFixed(3)}",
+                                liveBalanceYer.toStringAsFixed(3),
                                 style: TextStyle(
                                   fontSize: 42,
                                   fontWeight: FontWeight.w900,
@@ -2707,7 +2657,6 @@ jobs:
 
                           const SizedBox(height: 20),
 
-                          // Stats row
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
@@ -2735,7 +2684,6 @@ jobs:
                           ),
                           const SizedBox(height: 20),
 
-                          // Tank progress
                           ClipRRect(
                             borderRadius: BorderRadius.circular(10),
                             child: LinearProgressIndicator(
@@ -2759,7 +2707,6 @@ jobs:
                           ),
                           const SizedBox(height: 22),
 
-                          // Action button
                           SizedBox(
                             width: double.infinity,
                             height: 56,
@@ -2778,7 +2725,6 @@ jobs:
                                 try {
                                   if (!isActive) {
                                     if (portableMb < 1.0) {
-                                      // لا يوجد رصيد عائم — اشترِ أولاً
                                       if (widget.engine.serverCreditBalanceYer < 1) {
                                         setState(() => _feedback = "⚠️ رصيد الاستخدام غير كافٍ. اشحن أولاً من الإدارة.");
                                         return;
@@ -2810,7 +2756,6 @@ jobs:
                     ),
                     const SizedBox(height: 16),
 
-                    // Eco mode
                     Container(
                       padding: const EdgeInsets.all(4),
                       decoration: BoxDecoration(
@@ -2862,7 +2807,7 @@ jobs:
                 ],
               );
             }
-			            // ============ TAB 3: PARENTAL CONTROL ============
+
             Widget _buildParentalControlTab(String myId, List<dynamic> linkedChildren) {
               final TextEditingController childIdCtrl = TextEditingController();
               final TextEditingController childNameCtrl = TextEditingController();
@@ -2872,7 +2817,6 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Link new device
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -2951,7 +2895,6 @@ jobs:
                     ),
                     const SizedBox(height: 20),
 
-                    // Linked children header
                     Row(
                       children: [
                         const Icon(Icons.family_restroom, color: kMandarinOrange, size: 22),
@@ -3026,7 +2969,6 @@ jobs:
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Header
                         Row(
                           children: [
                             Container(
@@ -3085,7 +3027,6 @@ jobs:
 
                         const Divider(color: kMidGray, height: 20),
 
-                        // Eco mode
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           dense: true,
@@ -3099,7 +3040,6 @@ jobs:
                           onChanged: (v) => db.collection('wallets').doc(childId).update({'eco_mode': v}),
                         ),
 
-                        // Time limit
                         Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
@@ -3150,7 +3090,6 @@ jobs:
 
                         const SizedBox(height: 10),
 
-                        // Categories
                         const Text("حظر الفئات",
                             style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack)),
                         const SizedBox(height: 6),
@@ -3193,7 +3132,6 @@ jobs:
               );
             }
 
-            // ============ TAB 4: CONTACTS & HOST WALLET ============
             Widget _buildContactsAndHostWalletTab(String myId, Map<String, dynamic> w) {
               final idCtrl = TextEditingController();
               final nameCtrl = TextEditingController();
@@ -3204,7 +3142,6 @@ jobs:
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Host cards (if user owns host)
                     StreamBuilder<QuerySnapshot>(
                       stream: db.collection('hosts').where('owner_wallet_id', isEqualTo: myId).snapshots(),
                       builder: (context, hostSnap) {
@@ -3356,10 +3293,8 @@ jobs:
                       },
                     ),
 
-                    // Traffic source card
                     _buildTrafficSourceCard(myId),
 
-                    // Save local contact
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -3413,7 +3348,6 @@ jobs:
                     ),
                     const SizedBox(height: 16),
 
-                    // QR card
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
@@ -3461,7 +3395,6 @@ jobs:
               );
             }
 
-            // ============ TRAFFIC SOURCE CARD ============
             Widget _buildTrafficSourceCard(String myId) {
               final db = FirebaseFirestore.instance;
               return StreamBuilder<QuerySnapshot>(
@@ -3605,7 +3538,6 @@ jobs:
               );
             }
 
-            // ============ MY QR SHEET ============
             void _showMyQrSheet(String myId) {
               showModalBottomSheet(
                 context: context,
@@ -3660,7 +3592,6 @@ jobs:
             }
           }
 
-          // ============ QR SCANNER SHEET ============
           class _QrScannerSheet extends StatefulWidget {
             final String title;
             final TextEditingController manualCtrl;
@@ -3738,7 +3669,6 @@ jobs:
                                 }
                               },
                             ),
-                            // Overlay with frame
                             Container(
                               alignment: Alignment.center,
                               child: Container(
@@ -3756,7 +3686,6 @@ jobs:
                                 ),
                               ),
                             ),
-                            // Corner markers
                             Positioned(
                               top: 20, left: 20,
                               child: _cornerMarker(Alignment.topLeft),
@@ -3844,38 +3773,31 @@ jobs:
                 ),
               );
             }
-          }'''
-          main_clean = "\n".join(l[10:] if l.startswith("          ") else l for l in main_code.splitlines())
+          }
+          '''
+          main_clean = textwrap.dedent(main_code).strip() + "\n"
           main_clean = main_clean.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
-          open("lib/main.dart", "w", encoding="utf-8").write(main_clean)
+          with open("lib/main.dart", "w", encoding="utf-8") as mf:
+              mf.write(main_clean)
           print("PART5_DONE_MAIN_DART_FULL")
+
           # ============ GRADLE MODIFICATIONS ============
           for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               if os.path.exists(app_g):
-                  txt = open(app_g).read()
+                  with open(app_g, "r", encoding="utf-8") as gf:
+                      txt = gf.read()
                   txt = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", txt)
                   txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
-                  open(app_g, "w").write(txt)
-
-          # تفعيل multidex لدعم Firebase + mobile_scanner
-          gradle_kts = "android/app/build.gradle.kts"
-          gradle_groovy = "android/app/build.gradle"
-          if os.path.exists(gradle_kts):
-              txt = open(gradle_kts).read()
-              if "multiDexEnabled = true" not in txt:
-                  txt = txt.replace(
-                      'defaultConfig {',
-                      'defaultConfig {\n        multiDexEnabled = true'
-                  )
-                  open(gradle_kts, "w").write(txt)
-          elif os.path.exists(gradle_groovy):
-              txt = open(gradle_groovy).read()
-              if "multiDexEnabled true" not in txt:
-                  txt = txt.replace(
-                      'defaultConfig {',
-                      'defaultConfig {\n        multiDexEnabled true'
-                  )
-                  open(gradle_groovy, "w").write(txt)
+                  txt = re.sub(r"compileSdk\s*=?\s*flutter\.compileSdkVersion", "compileSdk = 34", txt)
+                  txt = re.sub(r"compileSdkVersion\s+flutter\.compileSdkVersion", "compileSdkVersion 34", txt)
+                  if app_g.endswith(".kts"):
+                      if "multiDexEnabled = true" not in txt:
+                          txt = txt.replace("defaultConfig {", "defaultConfig {\n        multiDexEnabled = true")
+                  else:
+                      if "multiDexEnabled true" not in txt:
+                          txt = txt.replace("defaultConfig {", "defaultConfig {\n        multiDexEnabled true")
+                  with open(app_g, "w", encoding="utf-8") as gf:
+                      gf.write(txt)
 
           print("PART6_DONE_BUILD_CONFIG_READY")
           print("===========================================")
@@ -3895,4 +3817,3 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 30
-			
