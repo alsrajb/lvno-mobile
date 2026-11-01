@@ -302,16 +302,10 @@ jobs:
                                   var hasSpecialConfig = false
                                   try {
                                       val sock = Socket()
-                                      sock.connect(InetSocketAddress(gatewayIp, customApiPort), 1500)
-                                      sock.soTimeout = 1500
-                                      val input = sock.getInputStream()
-                                      val buffer = ByteArray(64)
-                                      val bytesRead = input.read(buffer)
-                                      if (bytesRead > 0) {
-                                          isMikroTik = true
-                                          hasSpecialConfig = true
-                                      }
+                                      sock.connect(InetSocketAddress(gatewayIp, customApiPort), 3000)
                                       sock.close()
+                                      isMikroTik = true
+                                      hasSpecialConfig = true
                                   } catch (e: Exception) {
                                       isMikroTik = false
                                       hasSpecialConfig = false
