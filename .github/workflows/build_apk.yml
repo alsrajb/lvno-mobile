@@ -590,7 +590,7 @@ jobs:
               return usedRatio * currentChunkPriceYer;
             }
 
-            Future> getDeviceFingerprint() async {
+            Future<Map<String, String>> getDeviceFingerprint() async {
               String androidId = "dev_default_01";
               Map<String, String> devInfo = {};
 
@@ -600,7 +600,7 @@ jobs:
               } catch (_) {}
 
               try {
-                final info = await _vpnChannel.invokeMethod('getDeviceInfo');
+                final info = await _vpnChannel.invokeMethod<Map>('getDeviceInfo');
                 if (info != null) {
                   devInfo = info.map((k, v) => MapEntry(k.toString(), v.toString()));
                 }
@@ -654,7 +654,7 @@ jobs:
               } catch (_) {}
             }
 
-            Future> getLocalContacts() async {
+            Future<Map<String, String>> getLocalContacts() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
                 final Map<String, dynamic> decoded = jsonDecode(raw);
@@ -696,7 +696,7 @@ jobs:
               } catch (_) {}
             }
 
-            Future> getHostRoutingConfig() async {
+            Future<Map<String, dynamic>> getHostRoutingConfig() async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(currentHostId).get();
               if (!hostSnap.exists) return {};
@@ -710,7 +710,7 @@ jobs:
               };
             }
 
-            Future> verifyManualHostActivation(
+            Future<Map<String, dynamic>> verifyManualHostActivation(
                 String hostId, {bool requirePhysicalRouter = false}) async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
@@ -744,7 +744,7 @@ jobs:
                   };
                 }
 
-                final Map<dynamic, dynamic> idResult = await _vpnChannel.invokeMethod(
+                final Map<dynamic, dynamic> idResult = await _vpnChannel.invokeMethod<Map>(
                   'verifyMikroTikIdentity',
                   {'gatewayIp': expectedGateway, 'customApiPort': customApiPort},
                 ) ?? {};
@@ -910,7 +910,7 @@ jobs:
               }
             }
 
-            Future> startSession() async {
+            Future<Map<String, dynamic>> startSession() async {
               if (isStartingSession) return {'ok': false, 'reason': 'عملية جارية'};
               isStartingSession = true;
 
@@ -1568,7 +1568,7 @@ jobs:
               }
             }
 
-            Future> executeUnifiedTransfer({
+            Future<Map<String, dynamic>> executeUnifiedTransfer({
               required String receiverId,
               required int amountYer,
               required String transferMode,
