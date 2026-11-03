@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate LVNO SmartClient V10 (Full + Security + DNS)
+      - name: Generate LVNO SmartClient V10 (Real WireGuard VPN + Security + DNS)
         shell: python
         run: |
           import os, shutil, json, subprocess, re, textwrap
@@ -65,15 +65,16 @@ jobs:
               shutil.copy2("/tmp/google-services.json", "android/app/google-services.json")
 
           def write_clean(path, text):
+              text = text.replace("\u00a0", " ")
               cleaned = textwrap.dedent(text).strip() + "\n"
               with open(path, "w", encoding="utf-8") as f:
                   f.write(cleaned)
 
-          pubspec_txt = '''
+          pubspec_txt = r'''
           name: smartclient
-          description: LVNO SmartClient V10 - Portable Quota + Sessions + Security
+          description: LVNO SmartClient V10 - Real WireGuard VPN + Portable Quota
           publish_to: 'none'
-          version: 6.0.0+20
+          version: 6.1.0+23
 
           environment:
             sdk: '>=3.3.0 <4.0.0'
@@ -94,17 +95,26 @@ jobs:
           '''
           write_clean("pubspec.yaml", pubspec_txt)
 
+          for old_src in ["android/app/src/main/java", "android/app/src/main/kotlin"]:
+              if os.path.exists(old_src):
+                  shutil.rmtree(old_src)
+
           kt_dir = "android/app/src/main/kotlin/com/lvno/smartclient"
           os.makedirs(kt_dir, exist_ok=True)
 
-          vpn_kt = '''
+          vpn_kt = r'''
           package com.lvno.smartclient
 
           import android.content.Intent
           import android.net.TrafficStats
           import android.net.VpnService
           import android.os.ParcelFileDescriptor
+          import com.wireguard.android.backend.GoBackend
+          import com.wireguard.android.backend.Tunnel
+          import com.wireguard.config.Config
+          import java.io.BufferedReader
           import java.io.FileInputStream
+          import java.io.StringReader
           import java.nio.ByteBuffer
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
@@ -113,17 +123,25 @@ jobs:
           class VpnTunnelService : VpnService() {
               companion object {
                   val isRunning = AtomicBoolean(false)
+                  val isWireGuardMode = AtomicBoolean(false)
                   val ecoModeEnabled = AtomicBoolean(false)
                   val parentalLocked = AtomicBoolean(false)
                   val tunnelInspectorBytes = AtomicLong(0L)
                   var lastOsTotalBytes: Long = 0L
+                  var lastWgTotalBytes: Long = 0L
                   val blockedDomains = ConcurrentHashMap.newKeySet<String>()
+                  var goBackend: GoBackend? = null
+                  var activeWgTunnel: Tunnel? = null
               }
 
               private var vpnInterface: ParcelFileDescriptor? = null
               private var workerThread: Thread? = null
               private var pendingDns1: String = "94.140.14.14"
               private var pendingDns2: String = "94.140.15.15"
+              private var wgPrivateKey: String = ""
+              private var wgServerPubKey: String = ""
+              private var wgEndpoint: String = ""
+              private var wgClientIp: String = "10.88.0.2/24"
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   val action = intent?.action
@@ -149,36 +167,98 @@ jobs:
                       ecoModeEnabled.set(eco)
                       pendingDns1 = intent?.getStringExtra("dnsPrimary") ?: "94.140.14.14"
                       pendingDns2 = intent?.getStringExtra("dnsFallback") ?: "94.140.15.15"
+                      wgPrivateKey = intent?.getStringExtra("wgPrivateKey") ?: ""
+                      wgServerPubKey = intent?.getStringExtra("wgServerPubKey") ?: ""
+                      wgEndpoint = intent?.getStringExtra("wgEndpoint") ?: ""
+                      wgClientIp = intent?.getStringExtra("wgClientIp") ?: "10.88.0.2/24"
                       startVpnTunnel()
                   }
                   return START_STICKY
               }
 
               private fun startVpnTunnel() {
-                  try {
-                      val rx = TrafficStats.getTotalRxBytes()
-                      val tx = TrafficStats.getTotalTxBytes()
-                      lastOsTotalBytes = if (rx > 0L && tx > 0L) (rx + tx) else 0L
-                      tunnelInspectorBytes.set(0L)
+                  Thread {
+                      try {
+                          val rx = TrafficStats.getTotalRxBytes()
+                          val tx = TrafficStats.getTotalTxBytes()
+                          lastOsTotalBytes = if (rx > 0L && tx > 0L) (rx + tx) else 0L
+                          lastWgTotalBytes = 0L
+                          tunnelInspectorBytes.set(0L)
 
-                      val mtuSize = if (ecoModeEnabled.get()) 1280 else 1500
-                      val builder = Builder()
-                          .setSession("النفق الموحد")
-                          .setMtu(mtuSize)
-                          .addAddress("10.88.0.2", 24)
-                          .addDnsServer(pendingDns1)
-                          .addDnsServer(pendingDns2)
-                          .addRoute("10.99.99.0", 24)
-                          .addRoute("10.88.0.0", 24)
+                          val canUseRealWg = wgPrivateKey.isNotEmpty() &&
+                                  wgServerPubKey.isNotEmpty() &&
+                                  !wgServerPubKey.startsWith(" Put_") &&
+                                  wgEndpoint.isNotEmpty()
 
-                      vpnInterface = builder.establish()
-                      if (vpnInterface != null) {
-                          isRunning.set(true)
-                          startPacketEngine()
+                          if (canUseRealWg) {
+                              try {
+                                  if (goBackend == null) {
+                                      goBackend = GoBackend(applicationContext)
+                                  }
+                                  val mtuSize = if (ecoModeEnabled.get()) 1280 else 1420
+                                  val dns1 = if (pendingDns1.trim().isNotEmpty()) pendingDns1.trim() else "94.140.14.14"
+                                  val dns2 = if (pendingDns2.trim().isNotEmpty()) pendingDns2.trim() else "94.140.15.15"
+
+                                  val wgConfigStr = """
+                                      [Interface]
+                                      PrivateKey = $wgPrivateKey
+                                      Address = $wgClientIp
+                                      DNS = $dns1, $dns2
+                                      MTU = $mtuSize
+                                      ExcludedApplications = com.lvno.smartclient
+
+                                      [Peer]
+                                      PublicKey = $wgServerPubKey
+                                      Endpoint = $wgEndpoint
+                                      AllowedIPs = 0.0.0.0/0
+                                      PersistentKeepalive = 25
+                                  """.trimIndent()
+
+                                  val parsedConfig = Config.parse(BufferedReader(StringReader(wgConfigStr)))
+                                  val tunnelObj = object : Tunnel {
+                                      override fun getName(): String = "lvno_wg0"
+                                      override fun onStateChange(newState: Tunnel.State) {
+                                          isRunning.set(newState == Tunnel.State.UP)
+                                      }
+                                  }
+                                  activeWgTunnel = tunnelObj
+                                  goBackend?.setState(tunnelObj, Tunnel.State.UP, parsedConfig)
+                                  isWireGuardMode.set(true)
+                                  isRunning.set(true)
+                                  return@Thread
+                              } catch (_: Exception) {
+                                  isWireGuardMode.set(false)
+                              }
+                          }
+
+                          val mtuSize = if (ecoModeEnabled.get()) 1280 else 1500
+                          val dns1 = if (pendingDns1.trim().isNotEmpty()) pendingDns1.trim() else "94.140.14.14"
+                          val dns2 = if (pendingDns2.trim().isNotEmpty()) pendingDns2.trim() else "94.140.15.15"
+                          val cleanIp = wgClientIp.split("/")[0].trim().ifEmpty { "10.88.0.2" }
+
+                          val builder = Builder()
+                              .setSession("LVNO MikroTik Tunnel")
+                              .setMtu(mtuSize)
+                              .addAddress(cleanIp, 24)
+                              .addDnsServer(dns1)
+                              .addDnsServer(dns2)
+                              .addRoute("10.99.99.0", 24)
+                              .addRoute("10.88.0.0", 24)
+
+                          try {
+                              builder.addDisallowedApplication(packageName)
+                          } catch (_: Exception) {}
+
+                          vpnInterface = builder.establish()
+                          if (vpnInterface != null) {
+                              isWireGuardMode.set(false)
+                              isRunning.set(true)
+                              startPacketEngine()
+                          }
+                      } catch (e: Exception) {
+                          isRunning.set(false)
                       }
-                  } catch (e: Exception) {
-                      isRunning.set(false)
-                  }
+                  }.start()
               }
 
               private fun startPacketEngine() {
@@ -213,6 +293,16 @@ jobs:
 
               private fun stopVpnTunnel() {
                   isRunning.set(false)
+                  if (isWireGuardMode.get()) {
+                      Thread {
+                          try {
+                              activeWgTunnel?.let { t ->
+                                  goBackend?.setState(t, Tunnel.State.DOWN, null)
+                              }
+                          } catch (_: Exception) {}
+                      }.start()
+                      isWireGuardMode.set(false)
+                  }
                   workerThread?.interrupt()
                   workerThread = null
                   try { vpnInterface?.close() } catch (_: Exception) {}
@@ -228,7 +318,7 @@ jobs:
           '''
           write_clean(os.path.join(kt_dir, "VpnTunnelService.kt"), vpn_kt)
 
-          main_act_kt = '''
+          main_act_kt = r'''
           package com.lvno.smartclient
 
           import android.app.Activity
@@ -239,6 +329,7 @@ jobs:
           import android.net.VpnService
           import android.os.Build
           import android.provider.Settings
+          import com.wireguard.crypto.KeyPair
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
@@ -256,6 +347,10 @@ jobs:
               private var pendingEcoMode: Boolean = false
               private var pendingDns1: String = "94.140.14.14"
               private var pendingDns2: String = "94.140.15.15"
+              private var pendingWgPrivKey: String = ""
+              private var pendingWgServerPubKey: String = ""
+              private var pendingWgEndpoint: String = ""
+              private var pendingWgClientIp: String = "10.88.0.2/24"
 
               private fun getCurrentGatewayIp(): String {
                   return try {
@@ -268,6 +363,21 @@ jobs:
                   } catch (e: Exception) { "" }
               }
 
+              private fun getOrCreateWireGuardKeys(prefs: android.content.SharedPreferences): Map<String, String> {
+                  var priv = prefs.getString("wg_private_key", "") ?: ""
+                  var pub = prefs.getString("wg_public_key", "") ?: ""
+                  if (priv.isEmpty() || pub.isEmpty()) {
+                      val kp = KeyPair()
+                      priv = kp.privateKey.toBase64()
+                      pub = kp.publicKey.toBase64()
+                      prefs.edit()
+                          .putString("wg_private_key", priv)
+                          .putString("wg_public_key", pub)
+                          .apply()
+                  }
+                  return mapOf("privateKey" to priv, "publicKey" to pub)
+              }
+
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
 
@@ -277,6 +387,10 @@ jobs:
                           "getDeviceHardwareId" -> {
                               val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown_hw"
                               result.success(androidId)
+                          }
+                          "getOrCreateWgKeyPair" -> {
+                              val keys = getOrCreateWireGuardKeys(prefs)
+                              result.success(keys)
                           }
                           "getDeviceInfo" -> {
                               val map = HashMap<String, String>()
@@ -369,6 +483,19 @@ jobs:
                                   return@setMethodCallHandler
                               }
                               var delta = VpnTunnelService.tunnelInspectorBytes.getAndSet(0L)
+                              if (VpnTunnelService.isWireGuardMode.get() && VpnTunnelService.activeWgTunnel != null) {
+                                  try {
+                                      val stats = VpnTunnelService.goBackend?.getStatistics(VpnTunnelService.activeWgTunnel!!)
+                                      if (stats != null) {
+                                          val wgNow = stats.totalRx() + stats.totalTx()
+                                          if (wgNow > VpnTunnelService.lastWgTotalBytes) {
+                                              val wgDelta = wgNow - VpnTunnelService.lastWgTotalBytes
+                                              if (wgDelta > delta) delta = wgDelta
+                                          }
+                                          VpnTunnelService.lastWgTotalBytes = wgNow
+                                      }
+                                  } catch (_: Exception) {}
+                              }
                               val rx = TrafficStats.getTotalRxBytes()
                               val tx = TrafficStats.getTotalTxBytes()
                               if (rx > 0L && tx > 0L) {
@@ -383,9 +510,15 @@ jobs:
                               result.success(safeInt)
                           }
                           "startVpn" -> {
+                              val keys = getOrCreateWireGuardKeys(prefs)
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
                               pendingDns1 = call.argument<String>("dnsPrimary") ?: "94.140.14.14"
                               pendingDns2 = call.argument<String>("dnsFallback") ?: "94.140.15.15"
+                              pendingWgPrivKey = keys["privateKey"] ?: ""
+                              pendingWgServerPubKey = call.argument<String>("wgServerPubKey") ?: ""
+                              pendingWgEndpoint = call.argument<String>("wgEndpoint") ?: ""
+                              pendingWgClientIp = call.argument<String>("wgClientIp") ?: "10.88.0.2/24"
+
                               val prepareIntent = VpnService.prepare(this)
                               if (prepareIntent != null) {
                                   pendingResult = result
@@ -425,6 +558,10 @@ jobs:
                       putExtra("ecoMode", pendingEcoMode)
                       putExtra("dnsPrimary", pendingDns1)
                       putExtra("dnsFallback", pendingDns2)
+                      putExtra("wgPrivateKey", pendingWgPrivKey)
+                      putExtra("wgServerPubKey", pendingWgServerPubKey)
+                      putExtra("wgEndpoint", pendingWgEndpoint)
+                      putExtra("wgClientIp", pendingWgClientIp)
                   }
                   startService(serviceIntent)
               }
@@ -453,7 +590,7 @@ jobs:
           '''
           write_clean(os.path.join(kt_dir, "MainActivity.kt"), main_act_kt)
 
-          manifest_xml = '''
+          manifest_xml = r'''
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
@@ -502,7 +639,7 @@ jobs:
 
           print("PART1_DONE_ANDROID_NATIVE_READY")
 
-          core_code = '''
+          core_code = r'''
           import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
@@ -511,6 +648,9 @@ jobs:
           import 'package:flutter/services.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
           import 'package:crypto/crypto.dart';
+
+          typedef StrMap = Map<String, String>;
+          typedef DynMap = Map<String, dynamic>;
 
           class SmartClientEngine extends ChangeNotifier {
             String walletId = "";
@@ -525,6 +665,10 @@ jobs:
             String lastRouteType = "unknown";
             String lastDataSource = "unknown";
             String cachedGatewayIp = "";
+            String cachedWgPublicKey = "";
+            int cachedWgPort = 13231;
+            String myWgPublicKey = "";
+            String myAssignedTunnelIp = "10.88.0.2/24";
             String cachedDnsPrimary = "94.140.14.14";
             String cachedDnsFallback = "94.140.15.15";
 
@@ -570,7 +714,7 @@ jobs:
 
             double get fuelPumpRealtimeBalanceYer {
               if (activeChunkTotalBytes <= 0) {
-                return serverCreditBalanceYer.toDouble();
+                return serverCreditBalanceYer.toDouble() + portableValueYer;
               }
               final double remRatio = (activeChunkTotalBytes - activeChunkConsumedBytes) / activeChunkTotalBytes;
               final double clampedRatio = remRatio.clamp(0.0, 1.0);
@@ -584,9 +728,17 @@ jobs:
               return usedRatio * currentChunkPriceYer;
             }
 
-            Future<Map<String, String>> getDeviceFingerprint() async {
+            String _computeTunnelIpForWallet(String wId) {
+              final int numId = int.tryParse(wId) ?? 1001;
+              final int offset = (numId - 1000).clamp(2, 60000);
+              final int thirdOctet = (offset ~/ 250) % 254;
+              final int fourthOctet = (offset % 250) + 2;
+              return "10.88.$thirdOctet.$fourthOctet/24";
+            }
+
+            Future<StrMap> getDeviceFingerprint() async {
               String androidId = "dev_default_01";
-              Map<String, String> devInfo = {};
+              StrMap devInfo = {};
 
               try {
                 final id = await _vpnChannel.invokeMethod<String>('getDeviceHardwareId');
@@ -594,9 +746,16 @@ jobs:
               } catch (_) {}
 
               try {
-                final info = await _vpnChannel.invokeMethod<Map>('getDeviceInfo');
+                final info = await _vpnChannel.invokeMethod('getDeviceInfo');
                 if (info != null) {
                   devInfo = info.map((k, v) => MapEntry(k.toString(), v.toString()));
+                }
+              } catch (_) {}
+
+              try {
+                final wgKeys = await _vpnChannel.invokeMethod('getOrCreateWgKeyPair');
+                if (wgKeys != null && wgKeys['publicKey'] != null) {
+                  myWgPublicKey = wgKeys['publicKey'].toString();
                 }
               } catch (_) {}
 
@@ -612,6 +771,7 @@ jobs:
                 'os_version': devInfo['os_version'] ?? '',
                 'sdk_int': devInfo['sdk_int'] ?? '',
                 'fingerprint_hash': hash,
+                'wg_public_key': myWgPublicKey,
               };
             }
 
@@ -627,7 +787,7 @@ jobs:
             Future<void> loadSavedQuotaState() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getQuotaStateJson') ?? '{}';
-                final Map<String, dynamic> data = jsonDecode(raw);
+                final DynMap data = jsonDecode(raw);
                 activeChunkTotalBytes = ((data['totalBytes'] ?? 0) as num).toInt();
                 activeChunkConsumedBytes = ((data['consumedBytes'] ?? 0) as num).toInt();
                 currentChunkPriceYer = ((data['chunkPriceYer'] ?? 25.0) as num).toDouble();
@@ -648,10 +808,10 @@ jobs:
               } catch (_) {}
             }
 
-            Future<Map<String, String>> getLocalContacts() async {
+            Future<StrMap> getLocalContacts() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
-                final Map<String, dynamic> decoded = jsonDecode(raw);
+                final DynMap decoded = jsonDecode(raw);
                 return decoded.map((k, v) => MapEntry(k, v.toString()));
               } catch (_) {
                 return {};
@@ -679,18 +839,19 @@ jobs:
             }
 
             Future<void> _knockMikroTikGateway({required bool unlock, String gateway = '10.99.99.1'}) async {
+              if (gateway.trim().isEmpty) return;
               final int targetPort = unlock ? 9981 : 9982;
               try {
                 final socket = await Socket.connect(
-                  gateway,
+                  gateway.trim(),
                   targetPort,
-                  timeout: const Duration(milliseconds: 800),
+                  timeout: const Duration(milliseconds: 1200),
                 );
                 socket.destroy();
               } catch (_) {}
             }
 
-            Future<Map<String, dynamic>> getHostRoutingConfig() async {
+            Future<DynMap> getHostRoutingConfig() async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(currentHostId).get();
               if (!hostSnap.exists) return {};
@@ -704,7 +865,7 @@ jobs:
               };
             }
 
-            Future<Map<String, dynamic>> verifyManualHostActivation(
+            Future<DynMap> verifyManualHostActivation(
                 String hostId, {bool requirePhysicalRouter = false}) async {
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
@@ -732,27 +893,26 @@ jobs:
                 if (currentGateway.trim() != expectedGateway) {
                   return {
                     'ok': false,
-                    'reason': '⛔ أنت غير متصل براوتر الميكروتيك المعتمد\\n'
-                              'المتوقع: $expectedGateway\\n'
+                    'reason': '⛔ أنت غير متصل براوتر الميكروتيك المعتمد\n'
+                              'المتوقع: $expectedGateway\n'
                               'الحالي: ${currentGateway.isEmpty ? "غير متصل" : currentGateway}'
                   };
                 }
 
-                final Map<dynamic, dynamic> idResult = await _vpnChannel.invokeMethod<Map>(
+                final Map? idResult = await _vpnChannel.invokeMethod(
                   'verifyMikroTikIdentity',
                   {'gatewayIp': expectedGateway, 'customApiPort': customApiPort},
-                ) ?? {};
+                );
 
-                if (idResult['isMikroTik'] != true) {
-                  return {'ok': false, 'reason': '⛔ الراوتر المتصل ليس ميكروتيك'};
-                }
-                if (idResult['hasSpecialConfig'] != true) {
-                  return {'ok': false, 'reason': '⛔ الميكروتيك غير مهيأ (المنفذ $customApiPort مغلق)'};
+                if (idResult == null || idResult['isMikroTik'] != true || idResult['hasSpecialConfig'] != true) {
+                  return {'ok': false, 'reason': '⛔ الميكروتيك غير مهيأ أو المنفذ ($customApiPort) مغلق'};
                 }
               }
 
               currentHostId = hostId;
               cachedGatewayIp = expectedGateway;
+              cachedWgPublicKey = (data['wg_public_key'] ?? '').toString().trim();
+              cachedWgPort = ((data['wg_port'] ?? 13231) as num).toInt();
               return {'ok': true, 'data': data};
             }
 
@@ -776,13 +936,20 @@ jobs:
                 final devSnap = await tx.get(devRef);
                 if (devSnap.exists && devSnap.data()?['wallet_id'] != null) {
                   walletId = devSnap.data()!['wallet_id'].toString();
+                  myAssignedTunnelIp = _computeTunnelIpForWallet(walletId);
                   tx.set(devRef, {
                     'model': fp['model'],
                     'manufacturer': fp['manufacturer'],
                     'brand': fp['brand'],
                     'os_version': fp['os_version'],
                     'fingerprint_hash': fp['fingerprint_hash'],
+                    'wg_public_key': fp['wg_public_key'],
+                    'assigned_tunnel_ip': myAssignedTunnelIp,
                     'last_seen': FieldValue.serverTimestamp(),
+                  }, SetOptions(merge: true));
+                  tx.set(db.collection('wallets').doc(walletId), {
+                    'wg_public_key': fp['wg_public_key'],
+                    'assigned_tunnel_ip': myAssignedTunnelIp,
                   }, SetOptions(merge: true));
                   return walletId;
                 }
@@ -795,14 +962,15 @@ jobs:
                   nextId = ((counterSnap.data()!['last_wallet_number'] as num).toInt()) + 1;
                 }
 
-                int generalMaxBalance = 10000;
-                int generalDailyLimit = 5000;
+                int generalMaxBalance = 50000;
+                int generalDailyLimit = 20000;
                 if (configSnap.exists) {
-                  generalMaxBalance = ((configSnap.data()?['general_tier_max_balance_yer'] ?? 10000) as num).toInt();
-                  generalDailyLimit = ((configSnap.data()?['general_tier_daily_limit_yer'] ?? 5000) as num).toInt();
+                  generalMaxBalance = ((configSnap.data()?['general_tier_max_balance_yer'] ?? 50000) as num).toInt();
+                  generalDailyLimit = ((configSnap.data()?['general_tier_daily_limit_yer'] ?? 20000) as num).toInt();
                 }
 
                 final newWalletId = nextId.toString();
+                myAssignedTunnelIp = _computeTunnelIpForWallet(newWalletId);
                 final walletRef = db.collection('wallets').doc(newWalletId);
 
                 tx.set(counterRef, {'last_wallet_number': nextId}, SetOptions(merge: true));
@@ -815,6 +983,8 @@ jobs:
                   'brand': fp['brand'],
                   'os_version': fp['os_version'],
                   'fingerprint_hash': fp['fingerprint_hash'],
+                  'wg_public_key': fp['wg_public_key'],
+                  'assigned_tunnel_ip': myAssignedTunnelIp,
                   'install_count': 1,
                   'tamper_count': 0,
                   'first_seen': FieldValue.serverTimestamp(),
@@ -826,6 +996,8 @@ jobs:
                   'device_id': deviceId,
                   'display_name': 'حساب $newWalletId',
                   'full_name': '',
+                  'wg_public_key': fp['wg_public_key'],
+                  'assigned_tunnel_ip': myAssignedTunnelIp,
                   'cash_balance_yer': 0,
                   'credit_balance_yer': 0,
                   'portable_mb': 0.0,
@@ -867,8 +1039,8 @@ jobs:
                   'system_profit_pct': 10.0,
                   'credit_sender_discount_pct': 7.0,
                   'credit_receiver_bonus_pct': 3.0,
-                  'general_tier_max_balance_yer': 10000,
-                  'general_tier_daily_limit_yer': 5000,
+                  'general_tier_max_balance_yer': 50000,
+                  'general_tier_daily_limit_yer': 20000,
                   'heartbeat_interval_sec': 30,
                   'stale_timeout_sec': 120,
                   'tamper_threshold_mb': 5,
@@ -890,6 +1062,8 @@ jobs:
                   'activation_secret': 'MK-LVNO-2026',
                   'gateway_ip': '192.168.1.21',
                   'custom_api_port': 9728,
+                  'wg_public_key': '',
+                  'wg_port': 13231,
                   'manual_admin_approved': true,
                   'enforce_physical_router_check': true,
                   'status': 'active',
@@ -904,7 +1078,7 @@ jobs:
               }
             }
 
-            Future<Map<String, dynamic>> startSession() async {
+            Future<DynMap> startSession() async {
               if (isStartingSession) return {'ok': false, 'reason': 'عملية جارية'};
               isStartingSession = true;
 
@@ -921,14 +1095,16 @@ jobs:
                   final portable = ((w['portable_mb'] ?? 0) as num).toDouble();
                   final lifetime = ((w['lifetime_consumed_mb'] ?? 0) as num).toDouble();
 
-                  if (portable < 1.0) {
-                    throw Exception("الرصيد العائم فارغ — اشترِ دفعة أولاً");
+                  if (portable < 1.0 && remainingChunkMb < 1.0) {
+                    throw Exception("الرصيد العائم فارغ — اشترِ دفعة أو اشحن رصيد الاستخدام أولاً");
                   }
 
                   final sRef = db.collection('sessions').doc(sessionId);
                   tx.set(sRef, {
                     'wallet_id': walletId,
                     'host_id': currentHostId,
+                    'wg_public_key': myWgPublicKey,
+                    'assigned_tunnel_ip': myAssignedTunnelIp,
                     'session_start_total_mb': lifetime,
                     'current_total_mb': lifetime,
                     'reported_mb': 0.0,
@@ -949,10 +1125,17 @@ jobs:
                   return {
                     'session_id': sessionId,
                     'lifetime_at_start': lifetime,
+                    'portable_mb': portable,
                   };
                 });
 
                 currentSessionId = result['session_id'].toString();
+                final double srvPortable = ((result['portable_mb'] ?? 0) as num).toDouble();
+                if (activeChunkTotalBytes <= 0 && srvPortable >= 1.0) {
+                  activeChunkTotalBytes = (srvPortable * 1024 * 1024).round();
+                  activeChunkConsumedBytes = 0;
+                  currentChunkPriceYer = (srvPortable / 1000.0) * currentGbPriceYer;
+                }
                 _pendingMbReport = 0.0;
                 _ticksSinceHeartbeat = 0;
                 _ticksSinceReport = 0;
@@ -977,6 +1160,7 @@ jobs:
                   'pending_mb_since_report': _pendingMbReport,
                   'last_seen_at': FieldValue.serverTimestamp(),
                 });
+                await _knockMikroTikGateway(unlock: true, gateway: cachedGatewayIp);
               } catch (_) {}
             }
 
@@ -1018,8 +1202,8 @@ jobs:
                   if (actualMb < 0.01) return;
 
                   tx.update(wRef, {
-                    'portable_mb': currentPortable - actualMb,
-                    'portable_value_yer': currentPortableVal - mbCostInt,
+                    'portable_mb': (currentPortable - actualMb).clamp(0.0, 1000000.0),
+                    'portable_value_yer': (currentPortableVal - mbCostInt).clamp(0.0, 10000000.0),
                     'lifetime_consumed_mb': FieldValue.increment(actualMb),
                     'pending_mb_since_report': 0.0,
                     'updated_at': FieldValue.serverTimestamp(),
@@ -1157,7 +1341,7 @@ jobs:
             }
 
             Future<void> _forceSettleStaleSession(
-                String sessionId, Map<String, dynamic> s, double mb) async {
+                String sessionId, DynMap s, double mb) async {
               try {
                 final db = FirebaseFirestore.instance;
                 final hRef = db.collection('hosts').doc((s['host_id'] ?? '').toString());
@@ -1206,7 +1390,7 @@ jobs:
                 final hRef = db.collection('hosts').doc(currentHostId);
                 final cfgRef = db.collection('settings').doc('global_config');
 
-                final Map<String, dynamic> res = await db.runTransaction((tx) async {
+                final DynMap res = await db.runTransaction((tx) async {
                   final wSnap = await tx.get(wRef);
                   final hSnap = await tx.get(hRef);
                   final cfgSnap = await tx.get(cfgRef);
@@ -1333,7 +1517,7 @@ jobs:
             }
 
             Future<void> syncDevicePolicyFromWalletDoc(
-                Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
+                DynMap wData, DynMap cfgData) async {
               ecoMode = (wData['eco_mode'] ?? false) == true;
               serverCreditBalanceYer = ((wData['credit_balance_yer'] ?? 0) as num).toInt();
               portableMb = ((wData['portable_mb'] ?? 0) as num).toDouble();
@@ -1344,6 +1528,12 @@ jobs:
               serverRefillTriggerMb = ((cfgData['quota_refill_trigger_mb'] ?? 80) as num).toInt();
               cachedDnsPrimary = (cfgData['dns_primary'] ?? '94.140.14.14').toString();
               cachedDnsFallback = (cfgData['dns_secondary'] ?? '94.140.15.15').toString();
+
+              if (activeChunkTotalBytes <= 0 && portableMb >= 1.0) {
+                activeChunkTotalBytes = (portableMb * 1024 * 1024).round();
+                activeChunkConsumedBytes = 0;
+                currentChunkPriceYer = (portableMb / 1000.0) * currentGbPriceYer;
+              }
 
               final bool locked = (wData['parental_locked'] ?? false) == true;
               final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
@@ -1370,14 +1560,14 @@ jobs:
                   'parentalLocked': locked || timeExpired,
                   'blockedDomains': compiledDomains.toList(),
                 });
-                if (locked || timeExpired) {
+                if ((locked || timeExpired) && isVpnActive) {
                   await stopSmartConnection();
                 }
               } catch (_) {}
             }
 
             Future<bool> startSmartConnection(
-                Map<String, dynamic> wData, Map<String, dynamic> cfgData) async {
+                DynMap wData, DynMap cfgData) async {
               if ((wData['parental_locked'] ?? false) == true) {
                 throw Exception("تم إيقاف الاستخدام مؤقتاً من المشرف العائلي");
               }
@@ -1395,8 +1585,7 @@ jobs:
 
               await syncDevicePolicyFromWalletDoc(wData, cfgData);
 
-              final currentPortable = ((wData['portable_mb'] ?? 0) as num).toDouble();
-              if (currentPortable < 5.0) {
+              if (portableMb < 1.0 && remainingChunkMb < 1.0) {
                 await purchasePortableQuota();
               }
 
@@ -1405,18 +1594,25 @@ jobs:
                 throw Exception(sessionResult['reason'] ?? "فشل بدء الجلسة");
               }
 
+              final String endpoint = "$cachedGatewayIp:$cachedWgPort";
               final ok = await _vpnChannel.invokeMethod<bool>('startVpn', {
                 'ecoMode': ecoMode,
                 'dnsPrimary': cachedDnsPrimary,
                 'dnsFallback': cachedDnsFallback,
+                'wgServerPubKey': cachedWgPublicKey,
+                'wgEndpoint': endpoint,
+                'wgClientIp': myAssignedTunnelIp,
               });
               isVpnActive = ok ?? false;
-              if (isVpnActive) {
-                await _knockMikroTikGateway(unlock: true, gateway: cachedGatewayIp);
-                _startRealtimeFuelPumpLoop();
+              if (!isVpnActive) {
+                await closeSession(reason: 'vpn_permission_denied');
+                throw Exception("تعذر تشغيل خدمة النفق في الهاتف — تأكد من الموافقة على صلاحية VPN");
               }
+
+              await _knockMikroTikGateway(unlock: true, gateway: cachedGatewayIp);
+              _startRealtimeFuelPumpLoop();
               notifyListeners();
-              return isVpnActive;
+              return true;
             }
 
             Future<void> stopSmartConnection() async {
@@ -1562,7 +1758,7 @@ jobs:
               }
             }
 
-            Future<Map<String, dynamic>> executeUnifiedTransfer({
+            Future<DynMap> executeUnifiedTransfer({
               required String receiverId,
               required int amountYer,
               required String transferMode,
@@ -1572,7 +1768,7 @@ jobs:
                 throw Exception("يرجى إدخال رقم حساب صحيح ومبلغ أكبر من صفر");
               }
               if (cleanReceiver == walletId && transferMode == 'cash') {
-                throw Exception("لتحويل النقد إلى رصيد استخدام لنفس حسابك، اختر (رصيد استخدام)");
+                throw Exception("لتحويل النقد إلى رصيد استخدام لنفس حسابك، اختر (تغذية رصيد)");
               }
 
               final db = FirebaseFirestore.instance;
@@ -1594,8 +1790,8 @@ jobs:
 
                 final double senderDiscPct = ((cfg['credit_sender_discount_pct'] ?? 7.0) as num).toDouble();
                 final double receiverBonusPct = ((cfg['credit_receiver_bonus_pct'] ?? 3.0) as num).toDouble();
-                final int genMaxBal = ((cfg['general_tier_max_balance_yer'] ?? 10000) as num).toInt();
-                final int genDailyLim = ((cfg['general_tier_daily_limit_yer'] ?? 5000) as num).toInt();
+                final int genMaxBal = ((cfg['general_tier_max_balance_yer'] ?? 50000) as num).toInt();
+                final int genDailyLim = ((cfg['general_tier_daily_limit_yer'] ?? 20000) as num).toInt();
 
                 final int sCash = ((sData['cash_balance_yer'] ?? 0) as num).toInt();
                 final int sDailyUsed = ((sData['daily_transferred_today'] ?? 0) as num).toInt();
@@ -1616,8 +1812,10 @@ jobs:
                     ? ((rData['custom_max_balance_yer'] ?? genMaxBal) as num).toInt()
                     : genMaxBal;
 
-                if (sDailyUsed + amountYer > senderDailyMax) {
-                  throw Exception("تجاوزت السقف اليومي المتاح ($senderDailyMax ريال)");
+                final bool isSelfTopup = (walletId == cleanReceiver && transferMode != 'cash');
+
+                if (!isSelfTopup && (sDailyUsed + amountYer > senderDailyMax)) {
+                  throw Exception("تجاوزت السقف اليومي المتاح للتحويل ($senderDailyMax ريال)");
                 }
 
                 int netCashDeductedFromSender = amountYer;
@@ -1626,9 +1824,9 @@ jobs:
                 int finalCreditAddedToReceiver = 0;
 
                 if (transferMode == 'cash') {
-                  if (sCash < amountYer) throw Exception("الرصيد النقدي غير كافٍ");
-                  if (rCash + rCredit + amountYer > receiverMaxHolding) {
-                    throw Exception("حساب المستلم سيتجاوز السقف ($receiverMaxHolding ريال)");
+                  if (sCash < amountYer) throw Exception("الرصيد النقدي ($sCash ريال) غير كافٍ");
+                  if (rCash + amountYer > receiverMaxHolding) {
+                    throw Exception("الرصيد النقدي للمستلم سيتجاوز السقف المسموح ($receiverMaxHolding ريال)");
                   }
                   tx.update(senderRef, {
                     'cash_balance_yer': sCash - amountYer,
@@ -1650,19 +1848,14 @@ jobs:
                   }
 
                   if (walletId == cleanReceiver) {
-                    final int newTotal = (sCash - netCashDeductedFromSender) + rCredit + finalCreditAddedToReceiver;
-                    if (newTotal > receiverMaxHolding) {
-                      throw Exception("إجمالي الحساب سيتجاوز السقف ($receiverMaxHolding ريال)");
-                    }
                     tx.update(senderRef, {
                       'cash_balance_yer': sCash - netCashDeductedFromSender,
                       'credit_balance_yer': rCredit + finalCreditAddedToReceiver,
-                      'daily_transferred_today': sDailyUsed + amountYer,
                       'updated_at': FieldValue.serverTimestamp(),
                     });
                   } else {
-                    if (rCash + rCredit + finalCreditAddedToReceiver > receiverMaxHolding) {
-                      throw Exception("حساب المستلم سيتجاوز السقف ($receiverMaxHolding ريال)");
+                    if (rCredit + finalCreditAddedToReceiver > receiverMaxHolding) {
+                      throw Exception("رصيد المستلم سيتجاوز السقف ($receiverMaxHolding ريال)");
                     }
                     tx.update(senderRef, {
                       'cash_balance_yer': sCash - netCashDeductedFromSender,
@@ -1714,7 +1907,7 @@ jobs:
           write_clean("lib/smart_client_core.dart", core_code)
           print("PART3_DONE_CORE_DART_FULL")
 
-          main_code = '''
+          main_code = r'''
           import 'package:flutter/material.dart';
           import 'package:firebase_core/firebase_core.dart';
           import 'package:firebase_auth/firebase_auth.dart';
@@ -1959,7 +2152,7 @@ jobs:
                         Text("جاري فتح الحساب والتحقق من الشبكة...",
                             style: TextStyle(fontSize: 15, color: kBlack, fontWeight: FontWeight.bold)),
                         SizedBox(height: 8),
-                        Text("يتحقق من بوابة الميكروتيك...",
+                        Text("يتحقق من بوابة الميكروتيك ونفق WireGuard...",
                             style: TextStyle(fontSize: 12, color: kSoftGray)),
                       ],
                     ),
@@ -1986,7 +2179,7 @@ jobs:
             final TextEditingController _searchContactCtrl = TextEditingController();
             String _transferMode = "cash";
             String _feedback = "";
-            Map<String, String> _localContacts = {};
+            StrMap _localContacts = {};
             String _searchQuery = "";
 
             @override
@@ -2023,14 +2216,14 @@ jobs:
                 stream: db.collection('settings').doc('global_config').snapshots(),
                 builder: (context, cfgSnap) {
                   final cfg = (cfgSnap.hasData && cfgSnap.data!.exists)
-                      ? (cfgSnap.data!.data() as Map<String, dynamic>)
+                      ? (cfgSnap.data!.data() as DynMap)
                       : <String, dynamic>{};
 
                   return StreamBuilder<DocumentSnapshot>(
                     stream: db.collection('wallets').doc(myId).snapshots(),
                     builder: (context, walletSnap) {
                       final w = (walletSnap.hasData && walletSnap.data!.exists)
-                          ? (walletSnap.data!.data() as Map<String, dynamic>)
+                          ? (walletSnap.data!.data() as DynMap)
                           : <String, dynamic>{};
 
                       widget.engine.syncDevicePolicyFromWalletDoc(w, cfg);
@@ -2072,9 +2265,9 @@ jobs:
                                     child: const Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(Icons.circle, color: kWhite, size: 8),
+                                        Icon(Icons.lock, color: kWhite, size: 10),
                                         SizedBox(width: 4),
-                                        Text("نشط",
+                                        Text("نفق مشفر",
                                             style: TextStyle(color: kWhite, fontSize: 11, fontWeight: FontWeight.bold)),
                                       ],
                                     ),
@@ -2163,7 +2356,7 @@ jobs:
             }
 
             Widget _buildBalanceAndTransferTab(
-                String myId, int cashBal, bool kyc, Map<String, dynamic> w, Map<String, dynamic> cfg) {
+                String myId, int cashBal, bool kyc, DynMap w, DynMap cfg) {
               final filteredContacts = _localContacts.entries.where((e) {
                 if (_searchQuery.trim().isEmpty) return true;
                 return e.value.contains(_searchQuery) || e.key.contains(_searchQuery);
@@ -2308,7 +2501,12 @@ jobs:
                                   label: "تغذية رصيد",
                                   icon: Icons.bolt,
                                   selected: _transferMode == 'credit',
-                                  onTap: () => setState(() => _transferMode = 'credit'),
+                                  onTap: () => setState(() {
+                                    _transferMode = 'credit';
+                                    if (_receiverCtrl.text.trim().isEmpty) {
+                                      _receiverCtrl.text = myId;
+                                    }
+                                  }),
                                 ),
                               ),
                             ],
@@ -2322,11 +2520,11 @@ jobs:
                                   keyboardType: TextInputType.number,
                                   style: const TextStyle(color: kBlack),
                                   decoration: InputDecoration(
-                                    labelText: "رقم المستلم",
+                                    labelText: "رقم المستلم (أو رقمك للتغذية)",
                                     prefixIcon: const Icon(Icons.person, color: kMandarinOrange),
                                     helperText: _localContacts[_receiverCtrl.text.trim()] != null
                                         ? "الاسم: ${_localContacts[_receiverCtrl.text.trim()]}"
-                                        : null,
+                                        : (_receiverCtrl.text.trim() == myId ? "حسابك الشخصي" : null),
                                     helperStyle: const TextStyle(color: kSuccess, fontWeight: FontWeight.bold),
                                   ),
                                   onChanged: (_) => setState(() {}),
@@ -2377,8 +2575,11 @@ jobs:
                                   setState(() => _feedback = "⚠️ أدخل مبلغاً صحيحاً");
                                   return;
                                 }
+                                final targetId = _receiverCtrl.text.trim().isEmpty && _transferMode == 'credit'
+                                    ? myId
+                                    : _receiverCtrl.text.trim();
                                 final res = await widget.engine.executeUnifiedTransfer(
-                                  receiverId: _receiverCtrl.text.trim(),
+                                  receiverId: targetId,
                                   amountYer: amt,
                                   transferMode: _transferMode,
                                 );
@@ -2523,7 +2724,7 @@ jobs:
             }
 
             Widget _buildFuelPumpTunnelTab(
-                Map<String, dynamic> w, Map<String, dynamic> cfg, bool ecoMode) {
+                DynMap w, DynMap cfg, bool ecoMode) {
               final double liveBalanceYer = widget.engine.fuelPumpRealtimeBalanceYer;
               final double sessionSpentYer = widget.engine.currentSessionConsumedYer;
               final double remMb = widget.engine.remainingChunkMb;
@@ -2536,7 +2737,7 @@ jobs:
 
               final double tankProgress = widget.engine.activeChunkTotalBytes > 0
                   ? (remMb / chunkMaxMb).clamp(0.0, 1.0)
-                  : 0.0;
+                  : (portableMb > 0 ? (portableMb / chunkMaxMb).clamp(0.0, 1.0) : 0.0);
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
@@ -2580,11 +2781,11 @@ jobs:
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        isActive ? "العداد يعمل" : "العداد متوقف",
+                                        isActive ? "نفق WireGuard والعداد يعمل" : "النفق والعداد متوقف",
                                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kBlack),
                                       ),
                                       Text(
-                                        isActive ? "متصل بالشبكة" : "غير متصل",
+                                        isActive ? "متصل (${widget.engine.myAssignedTunnelIp})" : "غير متصل",
                                         style: TextStyle(
                                           fontSize: 11,
                                           color: isActive ? kSuccess : kSoftGray,
@@ -2670,7 +2871,7 @@ jobs:
                               Container(width: 1, height: 40, color: kMidGray),
                               _statColumn(
                                 label: "متبقي بالخزان",
-                                value: remMb.toStringAsFixed(1),
+                                value: (remMb > 0 ? remMb : portableMb).toStringAsFixed(1),
                                 unit: "MB",
                                 color: kMandarinOrange,
                               ),
@@ -2718,15 +2919,14 @@ jobs:
                               onPressed: () async {
                                 try {
                                   if (!isActive) {
-                                    if (portableMb < 1.0) {
-                                      if (widget.engine.serverCreditBalanceYer < 1) {
-                                        setState(() => _feedback = "⚠️ رصيد الاستخدام غير كافٍ. اشحن أولاً من الإدارة.");
-                                        return;
-                                      }
-                                      await widget.engine.purchasePortableQuota();
+                                    if (widget.engine.portableMb < 1.0 &&
+                                        widget.engine.remainingChunkMb < 1.0 &&
+                                        widget.engine.serverCreditBalanceYer < 1) {
+                                      setState(() => _feedback = "⚠️ رصيد الاستخدام غير كافٍ. حول من النقدي إلى (تغذية رصيد) أولاً.");
+                                      return;
                                     }
                                     await widget.engine.startSmartConnection(w, cfg);
-                                    setState(() => _feedback = "✅ تم تشغيل النفق والعداد");
+                                    setState(() => _feedback = "✅ تم تشغيل نفق WireGuard والعداد بنجاح");
                                   } else {
                                     await widget.engine.stopSmartConnection();
                                     setState(() => _feedback = "تم إيقاف النفق وحفظ العداد");
@@ -2749,6 +2949,35 @@ jobs:
                       ),
                     ),
                     const SizedBox(height: 16),
+
+                    if (widget.engine.myWgPublicKey.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        margin: const EdgeInsets.only(bottom: 16),
+                        decoration: BoxDecoration(
+                          color: kLightGray,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: kMidGray),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(Icons.vpn_key, color: kMandarinOrange, size: 18),
+                                SizedBox(width: 6),
+                                Text("مفتاح نفق جهازك (WireGuard Peer)",
+                                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kBlack)),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            SelectableText(
+                              "IP: ${widget.engine.myAssignedTunnelIp}\nPublicKey: ${widget.engine.myWgPublicKey}",
+                              style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: kBlack),
+                            ),
+                          ],
+                        ),
+                      ),
 
                     Container(
                       padding: const EdgeInsets.all(4),
@@ -2942,7 +3171,7 @@ jobs:
                 stream: db.collection('wallets').doc(childId).snapshots(),
                 builder: (context, snap) {
                   if (!snap.hasData || !snap.data!.exists) return const SizedBox.shrink();
-                  final c = snap.data!.data() as Map<String, dynamic>;
+                  final c = snap.data!.data() as DynMap;
                   final bool locked = (c['parental_locked'] ?? false) == true;
                   final bool childEco = (c['eco_mode'] ?? false) == true;
                   final int timeLimit = ((c['daily_time_limit_mins'] ?? 0) as num).toInt();
@@ -3126,7 +3355,7 @@ jobs:
               );
             }
 
-            Widget _buildContactsAndHostWalletTab(String myId, Map<String, dynamic> w) {
+            Widget _buildContactsAndHostWalletTab(String myId, DynMap w) {
               final idCtrl = TextEditingController();
               final nameCtrl = TextEditingController();
               final db = FirebaseFirestore.instance;
@@ -3142,7 +3371,7 @@ jobs:
                         if (!hostSnap.hasData || hostSnap.data!.docs.isEmpty) return const SizedBox.shrink();
                         final List<Widget> hostCards = [];
                         for (final doc in hostSnap.data!.docs) {
-                          final h = doc.data() as Map<String, dynamic>;
+                          final h = doc.data() as DynMap;
                           final String hostId = doc.id;
                           final String netName = (h['network_name'] ?? hostId).toString();
                           final int dueYer = ((h['amount_due_yer'] ?? 0) as num).toInt();
@@ -3395,9 +3624,7 @@ jobs:
                 stream: db
                     .collection('transactions')
                     .where('wallet_id', isEqualTo: myId)
-                    .where('type', whereIn: ['portable_purchase', 'consumption'])
-                    .orderBy('timestamp', descending: true)
-                    .limit(10)
+                    .limit(20)
                     .snapshots(),
                 builder: (context, snap) {
                   if (!snap.hasData || snap.data!.docs.isEmpty) {
@@ -3428,7 +3655,13 @@ jobs:
                     );
                   }
 
-                  final docs = snap.data!.docs;
+                  final docs = snap.data!.docs.toList();
+                  docs.sort((a, b) {
+                    final tA = ((a.data() as Map)['timestamp'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+                    final tB = ((b.data() as Map)['timestamp'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+                    return tB.compareTo(tA);
+                  });
+
                   return Container(
                     padding: const EdgeInsets.all(16),
                     margin: const EdgeInsets.only(bottom: 16),
@@ -3449,7 +3682,7 @@ jobs:
                           ],
                         ),
                         const SizedBox(height: 10),
-                        ...docs.map((doc) => _buildTxRow(doc.data() as Map<String, dynamic>)),
+                        ...docs.take(10).map((doc) => _buildTxRow(doc.data() as DynMap)),
                       ],
                     ),
                   );
@@ -3457,7 +3690,7 @@ jobs:
               );
             }
 
-            Widget _buildTxRow(Map<String, dynamic> tx) {
+            Widget _buildTxRow(DynMap tx) {
               final String type = (tx['type'] ?? '').toString();
               final bool isPurchase = type == 'portable_purchase';
               final int mb = ((tx['chunk_mb'] ?? tx['mb_delta'] ?? 0) as num).toInt();
@@ -3769,29 +4002,86 @@ jobs:
             }
           }
           '''
-          main_clean = textwrap.dedent(main_code).strip() + "\n"
+          main_clean = main_code.replace("\u00a0", " ")
+          main_clean = textwrap.dedent(main_clean).strip() + "\n"
           main_clean = main_clean.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           with open("lib/main.dart", "w", encoding="utf-8") as mf:
               mf.write(main_clean)
           print("PART5_DONE_MAIN_DART_FULL")
 
-          # ============ GRADLE MODIFICATIONS ============
-          for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              if os.path.exists(app_g):
-                  with open(app_g, "r", encoding="utf-8") as gf:
-                      txt = gf.read()
-                  txt = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", txt)
-                  txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
-                  txt = re.sub(r"compileSdk\s*=?\s*flutter\.compileSdkVersion", "compileSdk = 34", txt)
-                  txt = re.sub(r"compileSdkVersion\s+flutter\.compileSdkVersion", "compileSdkVersion 34", txt)
-                  if app_g.endswith(".kts"):
-                      if "multiDexEnabled = true" not in txt:
-                          txt = txt.replace("defaultConfig {", "defaultConfig {\n        multiDexEnabled = true")
-                  else:
-                      if "multiDexEnabled true" not in txt:
-                          txt = txt.replace("defaultConfig {", "defaultConfig {\n        multiDexEnabled true")
-                  with open(app_g, "w", encoding="utf-8") as gf:
-                      gf.write(txt)
+          for s_file in ["android/settings.gradle", "android/settings.gradle.kts"]:
+              if os.path.exists(s_file):
+                  with open(s_file, "r", encoding="utf-8") as sf:
+                      stxt = sf.read()
+                  stxt = re.sub(r'id\s+"com\.android\.application"\s+version\s+"[^"]+"', 'id "com.android.application" version "8.4.0"', stxt)
+                  stxt = re.sub(r'id\("com\.android\.application"\)\s+version\s+"[^"]+"', 'id("com.android.application") version "8.4.0"', stxt)
+                  stxt = re.sub(r'id\s+"org\.jetbrains\.kotlin\.android"\s+version\s+"[^"]+"', 'id "org.jetbrains.kotlin.android" version "1.9.24"', stxt)
+                  stxt = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"[^"]+"', 'id("org.jetbrains.kotlin.android") version "1.9.24"', stxt)
+                  with open(s_file, "w", encoding="utf-8") as sf:
+                      sf.write(stxt)
+
+          gw_prop = "android/gradle/wrapper/gradle-wrapper.properties"
+          if os.path.exists(gw_prop):
+              with open(gw_prop, "r", encoding="utf-8") as gwf:
+                  gwtxt = gwf.read()
+              gwtxt = re.sub(r"gradle-[0-9.]+-all\.zip", "gradle-8.7-all.zip", gwtxt)
+              gwtxt = re.sub(r"gradle-[0-9.]+-bin\.zip", "gradle-8.7-all.zip", gwtxt)
+              with open(gw_prop, "w", encoding="utf-8") as gwf:
+                  gwf.write(gwtxt)
+
+          if os.path.exists("android/app/build.gradle.kts"):
+              os.remove("android/app/build.gradle.kts")
+
+          app_build_gradle = r'''
+          plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          android {
+              namespace = "com.lvno.smartclient"
+              compileSdk = 35
+              ndkVersion = flutter.ndkVersion
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+                  coreLibraryDesugaringEnabled = true
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              defaultConfig {
+                  applicationId = "com.lvno.smartclient"
+                  minSdk = 23
+                  targetSdk = 34
+                  versionCode = 23
+                  versionName = "6.1.0"
+                  multiDexEnabled = true
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.debug
+                      minifyEnabled = false
+                      shrinkResources = false
+                  }
+              }
+          }
+
+          flutter {
+              source = "../.."
+          }
+
+          dependencies {
+              implementation "com.wireguard.android:tunnel:1.0.20230706"
+              coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"
+          }
+          '''
+          write_clean("android/app/build.gradle", app_build_gradle)
 
           print("PART6_DONE_BUILD_CONFIG_READY")
           print("===========================================")
@@ -3802,7 +4092,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --no-shrink
 
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
