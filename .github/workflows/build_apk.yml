@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate LVNO SmartClient V10 (Real WireGuard VPN + Security + DNS)
+      - name: Generate LVNO SmartClient V10.3.1 (Full 10-Point Sync)
         shell: python
         run: |
           import os, shutil, json, subprocess, re, textwrap
@@ -72,9 +72,9 @@ jobs:
 
           pubspec_txt = r'''
           name: smartclient
-          description: LVNO SmartClient V10 - Real WireGuard VPN + Portable Quota
+          description: LVNO SmartClient V10.3.1 - Real WireGuard VPN + Portable Quota
           publish_to: 'none'
-          version: 6.1.0+23
+          version: 6.1.1+25
 
           environment:
             sdk: '>=3.3.0 <4.0.0'
@@ -108,14 +108,11 @@ jobs:
           import android.content.Intent
           import android.net.TrafficStats
           import android.net.VpnService
-          import android.os.ParcelFileDescriptor
           import com.wireguard.android.backend.GoBackend
           import com.wireguard.android.backend.Tunnel
           import com.wireguard.config.Config
           import java.io.BufferedReader
-          import java.io.FileInputStream
           import java.io.StringReader
-          import java.nio.ByteBuffer
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
           import java.util.concurrent.atomic.AtomicLong
@@ -134,14 +131,12 @@ jobs:
                   var activeWgTunnel: Tunnel? = null
               }
 
-              private var vpnInterface: ParcelFileDescriptor? = null
-              private var workerThread: Thread? = null
-              private var pendingDns1: String = "94.140.14.14"
-              private var pendingDns2: String = "94.140.15.15"
+              private var pendingDns1: String = "10.88.0.1"
+              private var pendingDns2: String = "10.88.0.1"
               private var wgPrivateKey: String = ""
               private var wgServerPubKey: String = ""
               private var wgEndpoint: String = ""
-              private var wgClientIp: String = "10.88.0.2/24"
+              private var wgClientIp: String = "10.88.0.2/16"
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   val action = intent?.action
@@ -165,12 +160,12 @@ jobs:
                   if (!isRunning.get() && !parentalLocked.get()) {
                       val eco = intent?.getBooleanExtra("ecoMode", false) ?: false
                       ecoModeEnabled.set(eco)
-                      pendingDns1 = intent?.getStringExtra("dnsPrimary") ?: "94.140.14.14"
-                      pendingDns2 = intent?.getStringExtra("dnsFallback") ?: "94.140.15.15"
+                      pendingDns1 = intent?.getStringExtra("dnsPrimary") ?: "10.88.0.1"
+                      pendingDns2 = intent?.getStringExtra("dnsFallback") ?: "10.88.0.1"
                       wgPrivateKey = intent?.getStringExtra("wgPrivateKey") ?: ""
                       wgServerPubKey = intent?.getStringExtra("wgServerPubKey") ?: ""
                       wgEndpoint = intent?.getStringExtra("wgEndpoint") ?: ""
-                      wgClientIp = intent?.getStringExtra("wgClientIp") ?: "10.88.0.2/24"
+                      wgClientIp = intent?.getStringExtra("wgClientIp") ?: "10.88.0.2/16"
                       startVpnTunnel()
                   }
                   return START_STICKY
@@ -187,108 +182,66 @@ jobs:
 
                           val canUseRealWg = wgPrivateKey.isNotEmpty() &&
                                   wgServerPubKey.isNotEmpty() &&
-                                  !wgServerPubKey.startsWith(" Put_") &&
-                                  wgEndpoint.isNotEmpty()
+                                  !wgServerPubKey.contains("Put_") &&
+                                  wgServerPubKey.length >= 40 &&
+                                  wgEndpoint.isNotEmpty() &&
+                                  wgEndpoint.contains(":")
 
-                          if (canUseRealWg) {
-                              try {
-                                  if (goBackend == null) {
-                                      goBackend = GoBackend(applicationContext)
-                                  }
-                                  val mtuSize = if (ecoModeEnabled.get()) 1280 else 1420
-                                  val dns1 = if (pendingDns1.trim().isNotEmpty()) pendingDns1.trim() else "94.140.14.14"
-                                  val dns2 = if (pendingDns2.trim().isNotEmpty()) pendingDns2.trim() else "94.140.15.15"
+                          if (!canUseRealWg) {
+                              isRunning.set(false)
+                              isWireGuardMode.set(false)
+                              val failIntent = Intent("com.lvno.smartclient/VPN_FAIL").apply {
+                                  setPackage(packageName)
+                                  putExtra("reason", "WG_CONFIG_MISSING")
+                              }
+                              sendBroadcast(failIntent)
+                              stopSelf()
+                              return@Thread
+                          }
 
-                                  val wgConfigStr = """
-                                      [Interface]
-                                      PrivateKey = $wgPrivateKey
-                                      Address = $wgClientIp
-                                      DNS = $dns1, $dns2
-                                      MTU = $mtuSize
-                                      ExcludedApplications = com.lvno.smartclient
+                          if (goBackend == null) {
+                              goBackend = GoBackend(applicationContext)
+                          }
+                          val mtuSize = if (ecoModeEnabled.get()) 1280 else 1420
+                          val dns1 = if (pendingDns1.trim().isNotEmpty()) pendingDns1.trim() else "10.88.0.1"
 
-                                      [Peer]
-                                      PublicKey = $wgServerPubKey
-                                      Endpoint = $wgEndpoint
-                                      AllowedIPs = 0.0.0.0/0
-                                      PersistentKeepalive = 25
-                                  """.trimIndent()
+                          val wgConfigStr = """
+                              [Interface]
+                              PrivateKey = $wgPrivateKey
+                              Address = $wgClientIp
+                              DNS = $dns1
+                              MTU = $mtuSize
+                              ExcludedApplications = com.lvno.smartclient
 
-                                  val parsedConfig = Config.parse(BufferedReader(StringReader(wgConfigStr)))
-                                  val tunnelObj = object : Tunnel {
-                                      override fun getName(): String = "lvno_wg0"
-                                      override fun onStateChange(newState: Tunnel.State) {
-                                          isRunning.set(newState == Tunnel.State.UP)
-                                      }
-                                  }
-                                  activeWgTunnel = tunnelObj
-                                  goBackend?.setState(tunnelObj, Tunnel.State.UP, parsedConfig)
-                                  isWireGuardMode.set(true)
-                                  isRunning.set(true)
-                                  return@Thread
-                              } catch (_: Exception) {
-                                  isWireGuardMode.set(false)
+                              [Peer]
+                              PublicKey = $wgServerPubKey
+                              Endpoint = $wgEndpoint
+                              AllowedIPs = 0.0.0.0/0
+                              PersistentKeepalive = 25
+                          """.trimIndent()
+
+                          val parsedConfig = Config.parse(BufferedReader(StringReader(wgConfigStr)))
+                          val tunnelObj = object : Tunnel {
+                              override fun getName(): String = "lvno_wg0"
+                              override fun onStateChange(newState: Tunnel.State) {
+                                  isRunning.set(newState == Tunnel.State.UP)
                               }
                           }
-
-                          val mtuSize = if (ecoModeEnabled.get()) 1280 else 1500
-                          val dns1 = if (pendingDns1.trim().isNotEmpty()) pendingDns1.trim() else "94.140.14.14"
-                          val dns2 = if (pendingDns2.trim().isNotEmpty()) pendingDns2.trim() else "94.140.15.15"
-                          val cleanIp = wgClientIp.split("/")[0].trim().ifEmpty { "10.88.0.2" }
-
-                          val builder = Builder()
-                              .setSession("LVNO MikroTik Tunnel")
-                              .setMtu(mtuSize)
-                              .addAddress(cleanIp, 24)
-                              .addDnsServer(dns1)
-                              .addDnsServer(dns2)
-                              .addRoute("10.99.99.0", 24)
-                              .addRoute("10.88.0.0", 24)
-
-                          try {
-                              builder.addDisallowedApplication(packageName)
-                          } catch (_: Exception) {}
-
-                          vpnInterface = builder.establish()
-                          if (vpnInterface != null) {
-                              isWireGuardMode.set(false)
-                              isRunning.set(true)
-                              startPacketEngine()
-                          }
+                          activeWgTunnel = tunnelObj
+                          goBackend?.setState(tunnelObj, Tunnel.State.UP, parsedConfig)
+                          isWireGuardMode.set(true)
+                          isRunning.set(true)
                       } catch (e: Exception) {
                           isRunning.set(false)
+                          isWireGuardMode.set(false)
+                          val failIntent = Intent("com.lvno.smartclient/VPN_FAIL").apply {
+                              setPackage(packageName)
+                              putExtra("reason", e.message ?: "WG_START_FAILED")
+                          }
+                          sendBroadcast(failIntent)
+                          stopSelf()
                       }
                   }.start()
-              }
-
-              private fun startPacketEngine() {
-                  workerThread = Thread {
-                      val fd = vpnInterface?.fileDescriptor ?: return@Thread
-                      val inputStream = FileInputStream(fd)
-                      val packet = ByteBuffer.allocate(32767)
-
-                      while (isRunning.get() && !Thread.currentThread().isInterrupted) {
-                          try {
-                              if (parentalLocked.get()) {
-                                  stopVpnTunnel()
-                                  break
-                              }
-                              val length = inputStream.read(packet.array())
-                              if (length > 20) {
-                                  tunnelInspectorBytes.addAndGet(length.toLong())
-                                  if (ecoModeEnabled.get() && length > 1100) {
-                                      Thread.sleep(6)
-                                  }
-                                  packet.clear()
-                              } else {
-                                  Thread.sleep(10)
-                              }
-                          } catch (e: Exception) {
-                              break
-                          }
-                      }
-                  }
-                  workerThread?.start()
               }
 
               private fun stopVpnTunnel() {
@@ -303,10 +256,6 @@ jobs:
                       }.start()
                       isWireGuardMode.set(false)
                   }
-                  workerThread?.interrupt()
-                  workerThread = null
-                  try { vpnInterface?.close() } catch (_: Exception) {}
-                  vpnInterface = null
                   stopSelf()
               }
 
@@ -322,8 +271,10 @@ jobs:
           package com.lvno.smartclient
 
           import android.app.Activity
+          import android.content.BroadcastReceiver
           import android.content.Context
           import android.content.Intent
+          import android.content.IntentFilter
           import android.net.ConnectivityManager
           import android.net.TrafficStats
           import android.net.VpnService
@@ -345,21 +296,30 @@ jobs:
               private var pendingResult: MethodChannel.Result? = null
               private var pendingQrResult: MethodChannel.Result? = null
               private var pendingEcoMode: Boolean = false
-              private var pendingDns1: String = "94.140.14.14"
-              private var pendingDns2: String = "94.140.15.15"
+              private var pendingDns1: String = "10.88.0.1"
+              private var pendingDns2: String = "10.88.0.1"
               private var pendingWgPrivKey: String = ""
               private var pendingWgServerPubKey: String = ""
               private var pendingWgEndpoint: String = ""
-              private var pendingWgClientIp: String = "10.88.0.2/24"
+              private var pendingWgClientIp: String = "10.88.0.2/16"
+              private var vpnFailReceiver: BroadcastReceiver? = null
 
               private fun getCurrentGatewayIp(): String {
                   return try {
                       val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                      val network = cm.activeNetwork ?: return ""
-                      val linkProperties = cm.getLinkProperties(network) ?: return ""
-                      val routes = linkProperties.routes ?: emptyList()
-                      val defaultRoute = routes.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }
-                      defaultRoute?.gateway?.hostAddress ?: ""
+                      for (network in cm.allNetworks) {
+                          val caps = cm.getNetworkCapabilities(network) ?: continue
+                          if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) continue
+                          if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+                              caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                              val linkProperties = cm.getLinkProperties(network) ?: continue
+                              val routes = linkProperties.routes ?: emptyList()
+                              val defaultRoute = routes.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }
+                              val hostAddr = defaultRoute?.gateway?.hostAddress
+                              if (!hostAddr.isNullOrEmpty()) return hostAddr
+                          }
+                      }
+                      ""
                   } catch (e: Exception) { "" }
               }
 
@@ -380,6 +340,21 @@ jobs:
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
+
+                  if (vpnFailReceiver == null) {
+                      vpnFailReceiver = object : BroadcastReceiver() {
+                          override fun onReceive(ctx: Context?, intent: Intent?) {
+                              val reason = intent?.getStringExtra("reason") ?: "unknown"
+                              android.util.Log.e("LVNO_VPN", "VPN failed: $reason")
+                          }
+                      }
+                      val filter = IntentFilter("com.lvno.smartclient/VPN_FAIL")
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                          registerReceiver(vpnFailReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                      } else {
+                          registerReceiver(vpnFailReceiver, filter)
+                      }
+                  }
 
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
                       val prefs = getSharedPreferences("lvno_local_store", Context.MODE_PRIVATE)
@@ -409,7 +384,7 @@ jobs:
                               }.start()
                           }
                           "verifyMikroTikIdentity" -> {
-                              val gatewayIp = call.argument<String>("gatewayIp") ?: "192.168.88.1"
+                              val gatewayIp = call.argument<String>("gatewayIp") ?: "10.0.0.13"
                               val customApiPort = call.argument<Int>("customApiPort") ?: 9728
                               Thread {
                                   var isMikroTik = false
@@ -449,7 +424,7 @@ jobs:
                               result.success(true)
                           }
                           "verifyMikroTikHandshake" -> {
-                              val gatewayIp = call.argument<String>("gatewayIp") ?: "10.99.99.1"
+                              val gatewayIp = call.argument<String>("gatewayIp") ?: "10.88.0.1"
                               Thread {
                                   var verified = false
                                   try {
@@ -483,28 +458,32 @@ jobs:
                                   return@setMethodCallHandler
                               }
                               var delta = VpnTunnelService.tunnelInspectorBytes.getAndSet(0L)
+                              var usedWgStats = false
                               if (VpnTunnelService.isWireGuardMode.get() && VpnTunnelService.activeWgTunnel != null) {
                                   try {
                                       val stats = VpnTunnelService.goBackend?.getStatistics(VpnTunnelService.activeWgTunnel!!)
                                       if (stats != null) {
                                           val wgNow = stats.totalRx() + stats.totalTx()
-                                          if (wgNow > VpnTunnelService.lastWgTotalBytes) {
+                                          if (wgNow >= VpnTunnelService.lastWgTotalBytes) {
                                               val wgDelta = wgNow - VpnTunnelService.lastWgTotalBytes
                                               if (wgDelta > delta) delta = wgDelta
                                           }
                                           VpnTunnelService.lastWgTotalBytes = wgNow
+                                          usedWgStats = true
                                       }
                                   } catch (_: Exception) {}
                               }
-                              val rx = TrafficStats.getTotalRxBytes()
-                              val tx = TrafficStats.getTotalTxBytes()
-                              if (rx > 0L && tx > 0L) {
-                                  val nowTotal = rx + tx
-                                  if (VpnTunnelService.lastOsTotalBytes > 0L && nowTotal > VpnTunnelService.lastOsTotalBytes) {
-                                      val osDelta = nowTotal - VpnTunnelService.lastOsTotalBytes
-                                      if (osDelta > delta) delta = osDelta
+                              if (!usedWgStats) {
+                                  val rx = TrafficStats.getTotalRxBytes()
+                                  val tx = TrafficStats.getTotalTxBytes()
+                                  if (rx > 0L && tx > 0L) {
+                                      val nowTotal = rx + tx
+                                      if (VpnTunnelService.lastOsTotalBytes > 0L && nowTotal > VpnTunnelService.lastOsTotalBytes) {
+                                          val osDelta = nowTotal - VpnTunnelService.lastOsTotalBytes
+                                          if (osDelta > delta) delta = osDelta
+                                      }
+                                      VpnTunnelService.lastOsTotalBytes = nowTotal
                                   }
-                                  VpnTunnelService.lastOsTotalBytes = nowTotal
                               }
                               val safeInt = if (delta > 2000000000L) 2000000000 else delta.toInt()
                               result.success(safeInt)
@@ -512,12 +491,12 @@ jobs:
                           "startVpn" -> {
                               val keys = getOrCreateWireGuardKeys(prefs)
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
-                              pendingDns1 = call.argument<String>("dnsPrimary") ?: "94.140.14.14"
-                              pendingDns2 = call.argument<String>("dnsFallback") ?: "94.140.15.15"
+                              pendingDns1 = call.argument<String>("dnsPrimary") ?: "10.88.0.1"
+                              pendingDns2 = call.argument<String>("dnsFallback") ?: "10.88.0.1"
                               pendingWgPrivKey = keys["privateKey"] ?: ""
                               pendingWgServerPubKey = call.argument<String>("wgServerPubKey") ?: ""
                               pendingWgEndpoint = call.argument<String>("wgEndpoint") ?: ""
-                              pendingWgClientIp = call.argument<String>("wgClientIp") ?: "10.88.0.2/24"
+                              pendingWgClientIp = call.argument<String>("wgClientIp") ?: "10.88.0.2/16"
 
                               val prepareIntent = VpnService.prepare(this)
                               if (prepareIntent != null) {
@@ -585,6 +564,14 @@ jobs:
                       }
                       pendingQrResult = null
                   }
+              }
+
+              override fun onDestroy() {
+                  try {
+                      vpnFailReceiver?.let { unregisterReceiver(it) }
+                  } catch (_: Exception) {}
+                  vpnFailReceiver = null
+                  super.onDestroy()
               }
           }
           '''
@@ -668,9 +655,9 @@ jobs:
             String cachedWgPublicKey = "";
             int cachedWgPort = 13231;
             String myWgPublicKey = "";
-            String myAssignedTunnelIp = "10.88.0.2/24";
-            String cachedDnsPrimary = "94.140.14.14";
-            String cachedDnsFallback = "94.140.15.15";
+            String myAssignedTunnelIp = "10.88.0.2/16";
+            String cachedDnsPrimary = "10.88.0.1";
+            String cachedDnsFallback = "10.88.0.1";
 
             int activeChunkTotalBytes = 0;
             int activeChunkConsumedBytes = 0;
@@ -678,6 +665,8 @@ jobs:
             double currentGbPriceYer = 250.0;
             int serverChunkSizeMb = 100;
             int serverRefillTriggerMb = 80;
+            int batchReportThresholdPct = 90;
+            int batchSafetyIntervalSec = 60;
             int serverCreditBalanceYer = 0;
             double liveSpeedKbps = 0.0;
             double lifetimeConsumedMb = 0.0;
@@ -691,6 +680,7 @@ jobs:
             Timer? _fuelPumpTimer;
             Timer? _networkCheckTimer;
             int _ticksCounter = 0;
+            String _lastPolicySignature = "";
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -728,12 +718,15 @@ jobs:
               return usedRatio * currentChunkPriceYer;
             }
 
+            bool get hasPendingReport => _pendingMbReport >= 0.1;
+            double get pendingMbForRecovery => _pendingMbReport;
+
             String _computeTunnelIpForWallet(String wId) {
               final int numId = int.tryParse(wId) ?? 1001;
-              final int offset = (numId - 1000).clamp(2, 60000);
+              final int offset = (numId - 1000).clamp(1, 60000);
               final int thirdOctet = (offset ~/ 250) % 254;
               final int fourthOctet = (offset % 250) + 2;
-              return "10.88.$thirdOctet.$fourthOctet/24";
+              return "10.88.$thirdOctet.$fourthOctet/16";
             }
 
             Future<StrMap> getDeviceFingerprint() async {
@@ -759,8 +752,10 @@ jobs:
                 }
               } catch (_) {}
 
-              final raw = "$androidId|${devInfo['model'] ?? ''}|${devInfo['manufacturer'] ?? ''}|${devInfo['brand'] ?? ''}|${devInfo['device'] ?? ''}|${devInfo['os_version'] ?? ''}";
-              final hash = sha256.convert(utf8.encode(raw)).toString();
+              final rawStable = "$androidId|${devInfo['model'] ?? ''}|${devInfo['manufacturer'] ?? ''}|${devInfo['brand'] ?? ''}|${devInfo['device'] ?? ''}";
+              final hash = sha256.convert(utf8.encode(rawStable)).toString();
+              final rawLegacy = "$rawStable|${devInfo['os_version'] ?? ''}";
+              final legacyHash = sha256.convert(utf8.encode(rawLegacy)).toString();
 
               return {
                 'android_id': androidId,
@@ -771,6 +766,7 @@ jobs:
                 'os_version': devInfo['os_version'] ?? '',
                 'sdk_int': devInfo['sdk_int'] ?? '',
                 'fingerprint_hash': hash,
+                'legacy_fingerprint_hash': legacyHash,
                 'wg_public_key': myWgPublicKey,
               };
             }
@@ -838,7 +834,7 @@ jobs:
               }
             }
 
-            Future<void> _knockMikroTikGateway({required bool unlock, String gateway = '10.99.99.1'}) async {
+            Future<void> _knockMikroTikGateway({required bool unlock, String gateway = '10.0.0.13'}) async {
               if (gateway.trim().isEmpty) return;
               final int targetPort = unlock ? 9981 : 9982;
               try {
@@ -870,21 +866,22 @@ jobs:
               final db = FirebaseFirestore.instance;
               final hostSnap = await db.collection('hosts').doc(hostId).get();
               if (!hostSnap.exists) {
-                return {'ok': false, 'reason': 'هذه الشبكة غير مسجلة في السيرفر'};
+                return {'ok': false, 'reason': '⛔ هذه الشبكة غير مسجلة في السيرفر'};
               }
               final data = hostSnap.data()!;
               final status = (data['status'] ?? 'inactive').toString();
               final bool manualApproved = (data['manual_admin_approved'] ?? false) == true;
-              final String secretCode = (data['activation_secret'] ?? '').toString().trim();
               final String expectedGateway = (data['gateway_ip'] ?? '').toString().trim();
-              final int customApiPort = ((data['custom_api_port'] ?? 0) as num).toInt();
+              final int customApiPort = ((data['custom_api_port'] ?? 9728) as num).toInt();
 
-              if (status != 'active' || !manualApproved || secretCode.isEmpty) {
-                return {'ok': false, 'reason': '⛔ الشبكة غير مفعلة من الإدارة'};
+              if (status == 'suspended') {
+                return {'ok': false, 'reason': '⛔ هذه الشبكة موقوفة من الإدارة'};
               }
               if (expectedGateway.isEmpty || customApiPort < 1024) {
                 return {'ok': false, 'reason': '⛔ الشبكة غير مهيأة (بوابة أو منفذ ناقص)'};
               }
+
+              final bool needsAutoActivation = (status != 'active' || !manualApproved);
 
               if (requirePhysicalRouter) {
                 final String currentGateway =
@@ -904,14 +901,44 @@ jobs:
                   {'gatewayIp': expectedGateway, 'customApiPort': customApiPort},
                 );
 
-                if (idResult == null || idResult['isMikroTik'] != true || idResult['hasSpecialConfig'] != true) {
+                if (idResult == null || idResult['isMikroTik'] != true) {
                   return {'ok': false, 'reason': '⛔ الميكروتيك غير مهيأ أو المنفذ ($customApiPort) مغلق'};
                 }
+
+                if (needsAutoActivation) {
+                  try {
+                    final deviceId = await getDeviceHardwareId();
+                    await db.collection('hosts').doc(hostId).set({
+                      'status': 'active',
+                      'manual_admin_approved': true,
+                      'pending_auto_activation': false,
+                      'first_activated_at': FieldValue.serverTimestamp(),
+                      'first_activated_by_device': deviceId,
+                      'first_activated_auto': true,
+                    }, SetOptions(merge: true));
+                  } catch (e) {
+                    return {'ok': false, 'reason': '⛔ تعذر تفعيل الشبكة تلقائياً: $e'};
+                  }
+                }
+              } else if (needsAutoActivation) {
+                return {
+                  'ok': false,
+                  'reason': '⛔ الشبكة غير مفعلة — يجب التحقق من الراوتر أولاً'
+                };
+              }
+
+              final String wgPubKey = (data['wg_public_key'] ?? '').toString().trim();
+              if (wgPubKey.isEmpty || wgPubKey.contains('Put_') || wgPubKey.length < 40) {
+                return {
+                  'ok': false,
+                  'reason': '⛔ الشبكة مفعلة لكن لم يصل مفتاح WireGuard من الراوتر بعد.\n'
+                            'شغّل ترمنل الميكروتيك وانتظر ~30 ثانية.'
+                };
               }
 
               currentHostId = hostId;
               cachedGatewayIp = expectedGateway;
-              cachedWgPublicKey = (data['wg_public_key'] ?? '').toString().trim();
+              cachedWgPublicKey = wgPubKey;
               cachedWgPort = ((data['wg_port'] ?? 13231) as num).toInt();
               return {'ok': true, 'data': data};
             }
@@ -919,7 +946,16 @@ jobs:
             Future<String> registerOrRecoverDeviceWallet() async {
               final db = FirebaseFirestore.instance;
               final fp = await getDeviceFingerprint();
-              final deviceId = fp['android_id']!;
+              final String rawAndroidId = fp['android_id']!;
+              final String fallbackId = fp['fingerprint_hash']!;
+              final String legacyFallbackId = fp['legacy_fingerprint_hash'] ?? fallbackId;
+
+              final bool isValidAndroidId = rawAndroidId.isNotEmpty &&
+                  rawAndroidId != "dev_default_01" &&
+                  rawAndroidId != "unknown_hw" &&
+                  rawAndroidId != "9774d56d682e549c";
+
+              final String primaryId = isValidAndroidId ? rawAndroidId : fallbackId;
               await _ensureDefaultSystemSettings(db);
               await loadSavedQuotaState();
 
@@ -928,7 +964,23 @@ jobs:
                 throw Exception(check['reason'] ?? "الشبكة غير مفعلة");
               }
 
-              final devRef = db.collection('device_registry').doc(deviceId);
+              var devRef = db.collection('device_registry').doc(primaryId);
+              final initialSnap = await devRef.get();
+              if (!initialSnap.exists) {
+                final altRef = db.collection('device_registry').doc(fallbackId);
+                final altSnap = await altRef.get();
+                if (altSnap.exists) {
+                  devRef = altRef;
+                } else if (legacyFallbackId != fallbackId) {
+                  final legRef = db.collection('device_registry').doc(legacyFallbackId);
+                  final legSnap = await legRef.get();
+                  if (legSnap.exists) {
+                    devRef = legRef;
+                  }
+                }
+              }
+
+              final String deviceId = devRef.id;
               final counterRef = db.collection('settings').doc('wallet_counter');
               final configRef = db.collection('settings').doc('global_config');
 
@@ -938,6 +990,7 @@ jobs:
                   walletId = devSnap.data()!['wallet_id'].toString();
                   myAssignedTunnelIp = _computeTunnelIpForWallet(walletId);
                   tx.set(devRef, {
+                    'registered_host_id': currentHostId,
                     'model': fp['model'],
                     'manufacturer': fp['manufacturer'],
                     'brand': fp['brand'],
@@ -962,11 +1015,11 @@ jobs:
                   nextId = ((counterSnap.data()!['last_wallet_number'] as num).toInt()) + 1;
                 }
 
-                int generalMaxBalance = 50000;
-                int generalDailyLimit = 20000;
+                int generalMaxBalance = 10000;
+                int generalDailyLimit = 5000;
                 if (configSnap.exists) {
-                  generalMaxBalance = ((configSnap.data()?['general_tier_max_balance_yer'] ?? 50000) as num).toInt();
-                  generalDailyLimit = ((configSnap.data()?['general_tier_daily_limit_yer'] ?? 20000) as num).toInt();
+                  generalMaxBalance = ((configSnap.data()?['general_tier_max_balance_yer'] ?? 10000) as num).toInt();
+                  generalDailyLimit = ((configSnap.data()?['general_tier_daily_limit_yer'] ?? 5000) as num).toInt();
                 }
 
                 final newWalletId = nextId.toString();
@@ -1015,6 +1068,7 @@ jobs:
                   'eco_mode': false,
                   'parent_wallet_id': '',
                   'parental_locked': false,
+                  'account_locked': false,
                   'daily_time_limit_mins': 0,
                   'used_time_today_mins': 0,
                   'blocked_categories': <String>[],
@@ -1036,20 +1090,24 @@ jobs:
                   'gb_price_consumer_yer': 250,
                   'quota_chunk_mb': 100,
                   'quota_refill_trigger_mb': 80,
+                  'batch_report_threshold_pct': 90,
+                  'batch_safety_interval_sec': 60,
                   'system_profit_pct': 10.0,
                   'credit_sender_discount_pct': 7.0,
                   'credit_receiver_bonus_pct': 3.0,
-                  'general_tier_max_balance_yer': 50000,
-                  'general_tier_daily_limit_yer': 20000,
+                  'general_tier_max_balance_yer': 10000,
+                  'general_tier_daily_limit_yer': 5000,
                   'heartbeat_interval_sec': 30,
                   'stale_timeout_sec': 120,
                   'tamper_threshold_mb': 5,
                   'settlement_hour': 23,
                   'settlement_minute': 30,
                   'timezone': 'Asia/Aden',
-                  'dns_primary': '94.140.14.14',
-                  'dns_secondary': '94.140.15.15',
+                  'dns_primary': '10.88.0.1',
+                  'dns_secondary': '10.88.0.1',
                   'dns_filter_enabled': true,
+                  'auto_activate_hosts': true,
+                  'system_version': '10.3.1',
                 });
               }
               final hostRef = db.collection('hosts').doc(currentHostId);
@@ -1060,7 +1118,7 @@ jobs:
                   'owner_wallet_id': '1001',
                   'auto_transfer_to_wallet': false,
                   'activation_secret': 'MK-LVNO-2026',
-                  'gateway_ip': '192.168.1.21',
+                  'gateway_ip': '10.0.0.13',
                   'custom_api_port': 9728,
                   'wg_public_key': '',
                   'wg_port': 13231,
@@ -1154,7 +1212,6 @@ jobs:
                 await db.collection('sessions').doc(currentSessionId).update({
                   'last_heartbeat': FieldValue.serverTimestamp(),
                   'local_mb_since_report': _pendingMbReport,
-                  'current_total_mb': FieldValue.increment(_pendingMbReport),
                 });
                 await db.collection('wallets').doc(walletId).update({
                   'pending_mb_since_report': _pendingMbReport,
@@ -1189,17 +1246,18 @@ jobs:
                   final gbPrice = ((cfg['gb_price_consumer_yer'] ?? 250) as num).toDouble();
                   final sysProfitPct = ((cfg['system_profit_pct'] ?? 10.0) as num).toDouble();
 
-                  final double mbCost = (mbConsumed / 1000.0) * gbPrice;
-                  final int mbCostInt = mbCost.round() < 1 ? 1 : mbCost.round();
-                  final int sysShare = (mbCostInt * sysProfitPct / 100).round();
-                  final int hostShare = mbCostInt - sysShare;
-
                   final currentPortable = ((w['portable_mb'] ?? 0) as num).toDouble();
                   final currentPortableVal = ((w['portable_value_yer'] ?? 0) as num).toDouble();
 
-                  final actualMb = mbConsumed > currentPortable ? currentPortable : mbConsumed;
+                  final double actualMb = mbConsumed.clamp(0.0, currentPortable);
+                  final int maxAvailableYer = currentPortableVal.floor();
 
-                  if (actualMb < 0.01) return;
+                  if (actualMb < 0.01 || maxAvailableYer <= 0) return;
+
+                  final double mbCost = (actualMb / 1000.0) * gbPrice;
+                  final int mbCostInt = mbCost.round().clamp(1, maxAvailableYer);
+                  final int sysShare = (mbCostInt * sysProfitPct / 100.0).round();
+                  final int hostShare = mbCostInt - sysShare;
 
                   tx.update(wRef, {
                     'portable_mb': (currentPortable - actualMb).clamp(0.0, 1000000.0),
@@ -1242,8 +1300,9 @@ jobs:
                   });
                 });
 
-                _pendingMbReport = 0;
+                _pendingMbReport = 0.0;
                 _ticksSinceReport = 0;
+                await persistQuotaState();
               } catch (_) {
               } finally {
                 isReporting = false;
@@ -1280,7 +1339,8 @@ jobs:
                 });
 
                 currentSessionId = "";
-                _pendingMbReport = 0;
+                _pendingMbReport = 0.0;
+                await persistQuotaState();
               } catch (_) {}
             }
 
@@ -1292,7 +1352,13 @@ jobs:
                 final w = wSnap.data()!;
 
                 final staleSessionId = (w['current_session_id'] ?? '').toString();
-                if (staleSessionId.isEmpty) return;
+                if (staleSessionId.isEmpty) {
+                  if (_pendingMbReport > 0) {
+                    _pendingMbReport = 0.0;
+                    await persistQuotaState();
+                  }
+                  return;
+                }
 
                 final sSnap = await db.collection('sessions').doc(staleSessionId).get();
                 if (!sSnap.exists) {
@@ -1301,20 +1367,31 @@ jobs:
                     'current_host_id': '',
                     'pending_mb_since_report': 0.0,
                   });
+                  _pendingMbReport = 0.0;
+                  await persistQuotaState();
                   return;
                 }
 
                 final s = sSnap.data()!;
-                if (s['status'] != 'active') return;
+                if (s['status'] != 'active') {
+                  _pendingMbReport = 0.0;
+                  await persistQuotaState();
+                  return;
+                }
 
                 final Timestamp? rawHb = s['last_heartbeat'] as Timestamp?;
                 final DateTime? lastHb = rawHb?.toDate();
-                final pendingMb = ((s['local_mb_since_report'] ?? 0) as num).toDouble();
+                final serverPending = ((s['local_mb_since_report'] ?? 0) as num).toDouble();
+                final localPending = _pendingMbReport;
+                final actualPending = serverPending > localPending ? serverPending : localPending;
 
                 if (lastHb != null && DateTime.now().difference(lastHb).inMinutes >= 2) {
-                  if (pendingMb > 0.1) {
-                    await _forceSettleStaleSession(staleSessionId, s, pendingMb);
+                  if (actualPending >= 0.1) {
+                    await _forceSettleStaleSession(staleSessionId, s, actualPending);
                   }
+                  _pendingMbReport = 0.0;
+                  await persistQuotaState();
+
                   await db.collection('sessions').doc(staleSessionId).update({
                     'status': 'force_closed',
                     'closed_at': FieldValue.serverTimestamp(),
@@ -1331,7 +1408,7 @@ jobs:
                     'wallet_id': walletId,
                     'session_id': staleSessionId,
                     'host_id': s['host_id'],
-                    'gap_mb': pendingMb,
+                    'gap_mb': actualPending,
                     'severity': 'medium',
                     'resolved': false,
                     'created_at': FieldValue.serverTimestamp(),
@@ -1344,18 +1421,43 @@ jobs:
                 String sessionId, DynMap s, double mb) async {
               try {
                 final db = FirebaseFirestore.instance;
+                final wRef = db.collection('wallets').doc(walletId);
                 final hRef = db.collection('hosts').doc((s['host_id'] ?? '').toString());
                 final cfgSnap = await db.collection('settings').doc('global_config').get();
                 final gb = ((cfgSnap.data()?['gb_price_consumer_yer'] ?? 250) as num).toDouble();
                 final sp = ((cfgSnap.data()?['system_profit_pct'] ?? 10.0) as num).toDouble();
 
-                final cost = (mb / 1000) * gb;
-                final hostShare = (cost * (1 - sp / 100)).round();
-
                 await db.runTransaction((tx) async {
+                  final wSnap = await tx.get(wRef);
+                  if (!wSnap.exists) return;
+
+                  final wData = wSnap.data()!;
+                  final double curPortMb = ((wData['portable_mb'] ?? 0) as num).toDouble();
+                  final double curPortVal = ((wData['portable_value_yer'] ?? 0) as num).toDouble();
+
+                  final double actualMb = mb.clamp(0.0, curPortMb);
+                  final int maxAvailableYer = curPortVal.floor();
+
+                  if (actualMb < 0.01 || maxAvailableYer <= 0) return;
+
+                  final double rawCost = (actualMb / 1000.0) * gb;
+                  final int costInt = rawCost.round().clamp(1, maxAvailableYer);
+                  final int sysShare = (costInt * sp / 100.0).round();
+                  final int hostShare = costInt - sysShare;
+
+                  tx.update(wRef, {
+                    'portable_mb': (curPortMb - actualMb).clamp(0.0, 1000000.0),
+                    'portable_value_yer': (curPortVal - costInt).clamp(0.0, 10000000.0),
+                    'lifetime_consumed_mb': FieldValue.increment(actualMb),
+                  });
+
                   tx.set(hRef, {
-                    'current_month_wan_mb': FieldValue.increment(mb),
+                    'current_month_wan_mb': FieldValue.increment(actualMb),
                     'amount_due_yer': FieldValue.increment(hostShare),
+                  }, SetOptions(merge: true));
+
+                  tx.set(db.collection('admin_secret_vault').doc('system_income'), {
+                    'total_sys_profit_yer': FieldValue.increment(sysShare),
                   }, SetOptions(merge: true));
 
                   final txRef = db.collection('transactions').doc();
@@ -1364,10 +1466,10 @@ jobs:
                     'wallet_id': walletId,
                     'host_id': s['host_id'],
                     'session_id': sessionId,
-                    'mb_delta': mb,
-                    'mb_cost_yer': cost.round(),
+                    'mb_delta': actualMb,
+                    'mb_cost_yer': costInt,
                     'host_share_yer': hostShare,
-                    'sys_profit_yer': cost.round() - hostShare,
+                    'sys_profit_yer': sysShare,
                     'trigger': 'stale_recovery',
                     'timestamp': FieldValue.serverTimestamp(),
                   });
@@ -1526,8 +1628,10 @@ jobs:
               currentGbPriceYer = ((cfgData['gb_price_consumer_yer'] ?? 250) as num).toDouble();
               serverChunkSizeMb = ((cfgData['quota_chunk_mb'] ?? 100) as num).toInt();
               serverRefillTriggerMb = ((cfgData['quota_refill_trigger_mb'] ?? 80) as num).toInt();
-              cachedDnsPrimary = (cfgData['dns_primary'] ?? '94.140.14.14').toString();
-              cachedDnsFallback = (cfgData['dns_secondary'] ?? '94.140.15.15').toString();
+              batchReportThresholdPct = ((cfgData['batch_report_threshold_pct'] ?? 90) as num).toInt().clamp(50, 100);
+              batchSafetyIntervalSec = ((cfgData['batch_safety_interval_sec'] ?? 60) as num).toInt().clamp(30, 300);
+              cachedDnsPrimary = (cfgData['dns_primary'] ?? '10.88.0.1').toString();
+              cachedDnsFallback = (cfgData['dns_secondary'] ?? '10.88.0.1').toString();
 
               if (activeChunkTotalBytes <= 0 && portableMb >= 1.0) {
                 activeChunkTotalBytes = (portableMb * 1024 * 1024).round();
@@ -1535,7 +1639,9 @@ jobs:
                 currentChunkPriceYer = (portableMb / 1000.0) * currentGbPriceYer;
               }
 
-              final bool locked = (wData['parental_locked'] ?? false) == true;
+              final bool pLocked = (wData['parental_locked'] ?? false) == true;
+              final bool accLocked = (wData['account_locked'] ?? false) == true;
+              final bool locked = pLocked || accLocked;
               final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
               final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt();
               final bool timeExpired = (limitMins > 0 && usedMins >= limitMins);
@@ -1554,20 +1660,30 @@ jobs:
                 }
               }
 
-              try {
-                await _vpnChannel.invokeMethod('updatePolicy', {
-                  'ecoMode': ecoMode,
-                  'parentalLocked': locked || timeExpired,
-                  'blockedDomains': compiledDomains.toList(),
-                });
-                if ((locked || timeExpired) && isVpnActive) {
+              final sortedDoms = compiledDomains.toList()..sort();
+              final sig = "$ecoMode|${locked || timeExpired}|${sortedDoms.join(',')}";
+              if (sig != _lastPolicySignature) {
+                _lastPolicySignature = sig;
+                try {
+                  await _vpnChannel.invokeMethod('updatePolicy', {
+                    'ecoMode': ecoMode,
+                    'parentalLocked': locked || timeExpired,
+                    'blockedDomains': sortedDoms,
+                  });
+                } catch (_) {}
+              }
+              if ((locked || timeExpired) && isVpnActive) {
+                try {
                   await stopSmartConnection();
-                }
-              } catch (_) {}
+                } catch (_) {}
+              }
             }
 
             Future<bool> startSmartConnection(
                 DynMap wData, DynMap cfgData) async {
+              if ((wData['account_locked'] ?? false) == true) {
+                throw Exception("تم تعليق هذا الحساب للمراجعة الأمنية من الإدارة");
+              }
               if ((wData['parental_locked'] ?? false) == true) {
                 throw Exception("تم إيقاف الاستخدام مؤقتاً من المشرف العائلي");
               }
@@ -1690,9 +1806,13 @@ jobs:
                     _ticksSinceHeartbeat = 0;
                   }
 
-                  if (_pendingMbReport >= 5.0 || _ticksSinceReport >= 120) {
+                  final double batchTargetMb = (serverChunkSizeMb * (batchReportThresholdPct / 100.0)).clamp(5.0, 500.0);
+                  final int safetyTicks = (batchSafetyIntervalSec * 4).clamp(120, 1200);
+
+                  if (_pendingMbReport >= batchTargetMb || _ticksSinceReport >= safetyTicks) {
                     if (_pendingMbReport >= 0.1) {
-                      await reportConsumption(_pendingMbReport, trigger: 'periodic');
+                      final String trig = _pendingMbReport >= batchTargetMb ? 'batch_threshold' : 'safety_interval';
+                      await reportConsumption(_pendingMbReport, trigger: trig);
                     }
                   }
 
@@ -1790,8 +1910,8 @@ jobs:
 
                 final double senderDiscPct = ((cfg['credit_sender_discount_pct'] ?? 7.0) as num).toDouble();
                 final double receiverBonusPct = ((cfg['credit_receiver_bonus_pct'] ?? 3.0) as num).toDouble();
-                final int genMaxBal = ((cfg['general_tier_max_balance_yer'] ?? 50000) as num).toInt();
-                final int genDailyLim = ((cfg['general_tier_daily_limit_yer'] ?? 20000) as num).toInt();
+                final int genMaxBal = ((cfg['general_tier_max_balance_yer'] ?? 10000) as num).toInt();
+                final int genDailyLim = ((cfg['general_tier_daily_limit_yer'] ?? 5000) as num).toInt();
 
                 final int sCash = ((sData['cash_balance_yer'] ?? 0) as num).toInt();
                 final int sDailyUsed = ((sData['daily_transferred_today'] ?? 0) as num).toInt();
@@ -1848,6 +1968,9 @@ jobs:
                   }
 
                   if (walletId == cleanReceiver) {
+                    if (rCredit + finalCreditAddedToReceiver > receiverMaxHolding) {
+                      throw Exception("رصيد الاستخدام سيتجاوز السقف المسموح ($receiverMaxHolding ريال)");
+                    }
                     tx.update(senderRef, {
                       'cash_balance_yer': sCash - netCashDeductedFromSender,
                       'credit_balance_yer': rCredit + finalCreditAddedToReceiver,
@@ -1906,7 +2029,6 @@ jobs:
           '''
           write_clean("lib/smart_client_core.dart", core_code)
           print("PART3_DONE_CORE_DART_FULL")
-
           main_code = r'''
           import 'package:flutter/material.dart';
           import 'package:firebase_core/firebase_core.dart';
@@ -2073,7 +2195,19 @@ jobs:
 
                 await _engine.registerOrRecoverDeviceWallet();
                 await _engine.detectTamperOnBoot();
-                await _engine.loadSavedQuotaState();
+                if (_engine.hasPendingReport && _engine.currentSessionId.isEmpty) {
+                  final w = await FirebaseFirestore.instance
+                      .collection('wallets').doc(_engine.walletId).get();
+                  final sid = (w.data()?['current_session_id'] ?? '').toString();
+                  if (sid.isNotEmpty) {
+                    _engine.currentSessionId = sid;
+                    await _engine.reportConsumption(
+                        _engine.pendingMbForRecovery, trigger: 'crash_recovery');
+                    await _engine.closeSession(reason: 'crash_recovery');
+                  } else {
+                    await _engine.persistQuotaState();
+                  }
+                }
 
                 if (mounted) setState(() => _isReady = true);
               } catch (e) {
@@ -2177,6 +2311,10 @@ jobs:
             final TextEditingController _receiverCtrl = TextEditingController();
             final TextEditingController _amountCtrl = TextEditingController(text: "1000");
             final TextEditingController _searchContactCtrl = TextEditingController();
+            final TextEditingController _childIdCtrl = TextEditingController();
+            final TextEditingController _childNameCtrl = TextEditingController();
+            final TextEditingController _contactIdCtrl = TextEditingController();
+            final TextEditingController _contactNameCtrl = TextEditingController();
             String _transferMode = "cash";
             String _feedback = "";
             StrMap _localContacts = {};
@@ -3032,8 +3170,8 @@ jobs:
             }
 
             Widget _buildParentalControlTab(String myId, List<dynamic> linkedChildren) {
-              final TextEditingController childIdCtrl = TextEditingController();
-              final TextEditingController childNameCtrl = TextEditingController();
+              final TextEditingController childIdCtrl = _childIdCtrl;
+              final TextEditingController childNameCtrl = _childNameCtrl;
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
@@ -3356,8 +3494,8 @@ jobs:
             }
 
             Widget _buildContactsAndHostWalletTab(String myId, DynMap w) {
-              final idCtrl = TextEditingController();
-              final nameCtrl = TextEditingController();
+              final idCtrl = _contactIdCtrl;
+              final nameCtrl = _contactNameCtrl;
               final db = FirebaseFirestore.instance;
 
               return SingleChildScrollView(
@@ -4058,8 +4196,8 @@ jobs:
                   applicationId = "com.lvno.smartclient"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 23
-                  versionName = "6.1.0"
+                  versionCode = 25
+                  versionName = "6.1.1"
                   multiDexEnabled = true
               }
 
@@ -4085,7 +4223,7 @@ jobs:
 
           print("PART6_DONE_BUILD_CONFIG_READY")
           print("===========================================")
-          print("LVNO SmartClient V10 — All files generated")
+          print("LVNO SmartClient V10.3.1 — All files ready")
           print("===========================================")
 
       - name: Install Flutter Dependencies
@@ -4097,7 +4235,7 @@ jobs:
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
         with:
-          name: LVNO-SmartClient-V10
+          name: LVNO-SmartClient-V10-3-1
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 30
