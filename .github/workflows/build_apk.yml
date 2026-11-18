@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Compact LVNO V6 Project
+      - name: Generate Compact LVNO V6 Project (Live TrafficStats Fuel Meter)
         shell: python
         run: |
           import os, shutil, json, subprocess, re, textwrap
@@ -72,7 +72,7 @@ jobs:
           name: smartclient
           description: Unified Commercial Network App
           publish_to: 'none'
-          version: 6.3.0+19
+          version: 6.4.0+20
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -98,6 +98,7 @@ jobs:
           package com.lvno.smartclient
 
           import android.content.Intent
+          import android.net.TrafficStats
           import android.net.VpnService
           import android.os.ParcelFileDescriptor
           import java.io.FileInputStream
@@ -113,6 +114,7 @@ jobs:
                   val parentalLocked = AtomicBoolean(false)
                   val wanBytesCount = AtomicLong(0L)
                   val cacheBytesCount = AtomicLong(0L)
+                  var lastTotalBytes: Long = 0L
                   val blockedDomains = ConcurrentHashMap.newKeySet<String>()
               }
 
@@ -149,6 +151,12 @@ jobs:
 
               private fun startVpnTunnel() {
                   try {
+                      val rx = TrafficStats.getTotalRxBytes()
+                      val tx = TrafficStats.getTotalTxBytes()
+                      lastTotalBytes = if (rx > 0L && tx > 0L) (rx + tx) else 0L
+                      wanBytesCount.set(0L)
+                      cacheBytesCount.set(0L)
+
                       val mtuSize = if (ecoModeEnabled.get()) 1280 else 1500
                       val builder = Builder()
                           .setSession("النفق الموحد")
@@ -233,6 +241,7 @@ jobs:
           import android.app.Activity
           import android.content.Context
           import android.content.Intent
+          import android.net.TrafficStats
           import android.net.VpnService
           import android.provider.Settings
           import io.flutter.embedding.android.FlutterActivity
@@ -280,8 +289,22 @@ jobs:
                               result.success(VpnTunnelService.isRunning.get())
                           }
                           "getTrafficStats" -> {
-                              val wBytes = VpnTunnelService.wanBytesCount.getAndSet(0L)
+                              var wBytes = VpnTunnelService.wanBytesCount.getAndSet(0L)
                               val cBytes = VpnTunnelService.cacheBytesCount.getAndSet(0L)
+                              if (VpnTunnelService.isRunning.get()) {
+                                  val rx = TrafficStats.getTotalRxBytes()
+                                  val tx = TrafficStats.getTotalTxBytes()
+                                  if (rx > 0L && tx > 0L) {
+                                      val nowTotal = rx + tx
+                                      if (VpnTunnelService.lastTotalBytes > 0L && nowTotal > VpnTunnelService.lastTotalBytes) {
+                                          val osDelta = nowTotal - VpnTunnelService.lastTotalBytes
+                                          if (osDelta > wBytes) {
+                                              wBytes = osDelta
+                                          }
+                                      }
+                                      VpnTunnelService.lastTotalBytes = nowTotal
+                                  }
+                              }
                               val stats = mapOf("wanBytes" to wBytes, "cacheBytes" to cBytes)
                               result.success(stats)
                           }
@@ -431,6 +454,8 @@ jobs:
             int serverChunkSizeMb = 100;
             int serverRefillTriggerMb = 80;
             int serverCreditBalanceYer = 0;
+            double liveSpeedKbps = 0.0;
+            int _saveTickCounter = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -518,14 +543,6 @@ jobs:
                 decoded['__q_price__'] = currentChunkPriceYer.toStringAsFixed(3);
                 await _vpnChannel.invokeMethod('saveLocalContactsJson', {'json': jsonEncode(decoded)});
               } catch (_) {}
-            }
-
-            Future<String> tryScanQrNative() async {
-              try {
-                return await _vpnChannel.invokeMethod<String>('scanQrNative') ?? '';
-              } catch (_) {
-                return '';
-              }
             }
 
             Future<void> knockMikroTikGateway({required bool unlock}) async {
@@ -766,11 +783,19 @@ jobs:
                 final int cBytes = ((res?['cacheBytes'] ?? 0) as num).toInt();
                 final int delta = wBytes + cBytes;
 
-                if (delta > 0) {
+                if (delta > 0 && !isPurchasingChunk) {
                   activeChunkConsumedBytes += delta;
+                  liveSpeedKbps = (delta * 5.0) / 1024.0;
                   if (activeChunkConsumedBytes > activeChunkTotalBytes) {
                     activeChunkConsumedBytes = activeChunkTotalBytes;
                   }
+                } else {
+                  liveSpeedKbps = 0.0;
+                }
+
+                _saveTickCounter++;
+                if (_saveTickCounter >= 10) {
+                  _saveTickCounter = 0;
                   await persistQuotaState();
                 }
 
@@ -787,27 +812,6 @@ jobs:
                   await stopSmartConnection();
                 }
               } catch (_) {}
-            }
-
-            Future<void> simulateFastFuelConsumption(int megabytesToConsume) async {
-              if (!isVpnActive) {
-                throw Exception("شغّل النفق أولاً لترى عداد البنزين يتحرك بالفاصلة العشرية");
-              }
-              activeChunkConsumedBytes += megabytesToConsume * 1024 * 1024;
-              if (activeChunkConsumedBytes > activeChunkTotalBytes) {
-                activeChunkConsumedBytes = activeChunkTotalBytes;
-              }
-              await persistQuotaState();
-
-              final int remBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
-              int lowWaterMb = serverChunkSizeMb - serverRefillTriggerMb;
-              if (lowWaterMb < 5) lowWaterMb = 5;
-              if (remBytes <= lowWaterMb * 1024 * 1024 && !isPurchasingChunk && serverCreditBalanceYer > 0) {
-                await purchaseQuotaChunkFromServer();
-              }
-              if (activeChunkTotalBytes - activeChunkConsumedBytes <= 0) {
-                await stopSmartConnection();
-              }
             }
 
             Future<int> withdrawHostEarningsToMyWallet(String hostId) async {
@@ -893,6 +897,7 @@ jobs:
             }
 
             Future<void> stopSmartConnection() async {
+              liveSpeedKbps = 0.0;
               await persistQuotaState();
               await knockMikroTikGateway(unlock: false);
               try {
@@ -1199,7 +1204,7 @@ jobs:
             void initState() {
               super.initState();
               _loadContacts();
-              _uiFuelTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
+              _uiFuelTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
                 if (widget.engine.isVpnActive) {
                   await widget.engine.pollAndConsumeTrafficTick();
                   if (mounted) setState(() {});
@@ -1216,6 +1221,30 @@ jobs:
             Future<void> _loadContacts() async {
               final map = await widget.engine.getLocalContacts();
               if (mounted) setState(() => _localContacts = map);
+            }
+
+            Future<void> _animateTestFuelPump(int mbToConsume) async {
+              if (!widget.engine.isVpnActive) return;
+              final int stepBytes = (mbToConsume * 1024 * 1024) ~/ 20;
+              for (int i = 0; i < 20; i++) {
+                await Future.delayed(const Duration(milliseconds: 50));
+                widget.engine.activeChunkConsumedBytes += stepBytes;
+                if (widget.engine.activeChunkConsumedBytes > widget.engine.activeChunkTotalBytes) {
+                  widget.engine.activeChunkConsumedBytes = widget.engine.activeChunkTotalBytes;
+                }
+                if (mounted) setState(() {});
+              }
+              await widget.engine.persistQuotaState();
+              final int remBytes = widget.engine.activeChunkTotalBytes - widget.engine.activeChunkConsumedBytes;
+              int lowWaterMb = widget.engine.serverChunkSizeMb - widget.engine.serverRefillTriggerMb;
+              if (lowWaterMb < 5) lowWaterMb = 5;
+              if (remBytes <= lowWaterMb * 1024 * 1024 && !widget.engine.isPurchasingChunk && widget.engine.serverCreditBalanceYer > 0) {
+                await widget.engine.purchaseQuotaChunkFromServer();
+              }
+              if (widget.engine.activeChunkTotalBytes - widget.engine.activeChunkConsumedBytes <= 0) {
+                await widget.engine.stopSmartConnection();
+              }
+              if (mounted) setState(() {});
             }
 
             @override
@@ -1443,21 +1472,21 @@ jobs:
                       child: Column(
                         children: [
                           Text(
-                            widget.engine.isVpnActive ? "النفق المجزأ والعداد نشط" : "الإنترنت مقفول (النفق متوقف)",
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                            widget.engine.isVpnActive ? "النفق المجزأ والعداد نشط (${widget.engine.liveSpeedKbps.toStringAsFixed(1)} KB/s)" : "الإنترنت مقفول (النفق متوقف)",
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                           ),
                           const SizedBox(height: 12),
                           Text(
-                            "${liveBalanceYer.toStringAsFixed(3)} ريال",
+                            "${liveBalanceYer.toStringAsFixed(4)} ريال",
                             style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, fontFamily: 'monospace', color: Color(0xFF10B981)),
                           ),
                           const SizedBox(height: 12),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
-                              Text("الصرف: ${sessionSpentYer.toStringAsFixed(3)} ريال", style: const TextStyle(color: Colors.amber)),
-                              Text("مستهلك: ${usedMb.toStringAsFixed(2)} MB"),
-                              Text("متبقي: ${remMb.toStringAsFixed(2)} MB", style: const TextStyle(color: Color(0xFF6EE7B7))),
+                              Text("الصرف: ${sessionSpentYer.toStringAsFixed(4)} ريال", style: const TextStyle(color: Colors.amber, fontFamily: 'monospace')),
+                              Text("مستهلك: ${usedMb.toStringAsFixed(3)} MB", style: const TextStyle(fontFamily: 'monospace')),
+                              Text("متبقي: ${remMb.toStringAsFixed(3)} MB", style: const TextStyle(color: Color(0xFF6EE7B7), fontFamily: 'monospace')),
                             ],
                           ),
                           const SizedBox(height: 12),
@@ -1494,13 +1523,12 @@ jobs:
                             OutlinedButton(
                               onPressed: () async {
                                 try {
-                                  await widget.engine.simulateFastFuelConsumption(25);
-                                  setState(() {});
+                                  await _animateTestFuelPump(25);
                                 } catch (e) {
                                   setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                                 }
                               },
-                              child: const Text("اختبار سحب 25 MB لرؤية حركة الفاصلة والشراء عند 80 MB"),
+                              child: const Text("اختبار سحب 25 MB لرؤية دوران الفاصلة والشراء عند 80 MB"),
                             ),
                           ],
                         ],
