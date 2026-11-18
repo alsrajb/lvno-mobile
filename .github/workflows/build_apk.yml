@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Compact LVNO V6 Project (Live TrafficStats Fuel Meter)
+      - name: Generate Compact LVNO V6 Project (Strict Physical Network Lock)
         shell: python
         run: |
           import os, shutil, json, subprocess, re, textwrap
@@ -72,7 +72,7 @@ jobs:
           name: smartclient
           description: Unified Commercial Network App
           publish_to: 'none'
-          version: 6.4.0+20
+          version: 6.5.0+21
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -247,6 +247,10 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.io.ByteArrayOutputStream
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
 
           class MainActivity: FlutterActivity() {
               private val CHANNEL = "com.lvno.smartclient/vpn"
@@ -255,6 +259,45 @@ jobs:
               private var pendingResult: MethodChannel.Result? = null
               private var pendingQrResult: MethodChannel.Result? = null
               private var pendingEcoMode: Boolean = false
+
+              // فحص بصمة الميكروتك الفيزيائية عبر UDP Port 53 المباشر
+              private fun verifyMikroTikSignature(routerIp: String, domainToQuery: String): Boolean {
+                  var socket: DatagramSocket? = null
+                  try {
+                      socket = DatagramSocket()
+                      socket.soTimeout = 1000
+                      val out = ByteArrayOutputStream()
+                      out.write(byteArrayOf(0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
+                      for (part in domainToQuery.split(".")) {
+                          val b = part.toByteArray()
+                          out.write(b.size)
+                          out.write(b)
+                      }
+                      out.write(byteArrayOf(0x00, 0x00, 0x01, 0x00, 0x01))
+                      val req = out.toByteArray()
+                      val pkt = DatagramPacket(req, req.size, InetAddress.getByName(routerIp), 53)
+                      socket.send(pkt)
+
+                      val buf = ByteArray(512)
+                      val resp = DatagramPacket(buf, buf.size)
+                      socket.receive(resp)
+                      val len = resp.length
+                      if (len >= 16) {
+                          val b0 = buf[len - 4].toInt() and 0xFF
+                          val b1 = buf[len - 3].toInt() and 0xFF
+                          val b2 = buf[len - 2].toInt() and 0xFF
+                          val b3 = buf[len - 1].toInt() and 0xFF
+                          if (b0 == 10 && b1 == 99 && b2 == 99 && b3 == 1) {
+                              return true
+                          }
+                      }
+                      return false
+                  } catch (e: Exception) {
+                      return false
+                  } finally {
+                      try { socket?.close() } catch (e: Exception) {}
+                  }
+              }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
@@ -274,6 +317,20 @@ jobs:
                               val jsonStr = call.argument<String>("json") ?: "{}"
                               prefs.edit().putString("contacts_json", jsonStr).apply()
                               result.success(true)
+                          }
+                          "checkPhysicalRouter" -> {
+                              val gatewayIp = call.argument<String>("gatewayIp") ?: "10.99.99.1"
+                              val hostId = call.argument<String>("hostId") ?: "host_alhuda_01"
+                              Thread {
+                                  var matched = verifyMikroTikSignature(gatewayIp, "$hostId.lvno.local")
+                                  if (!matched) {
+                                      matched = verifyMikroTikSignature(gatewayIp, "gateway.lvno.local")
+                                  }
+                                  if (!matched && gatewayIp != "10.99.99.1") {
+                                      matched = verifyMikroTikSignature("10.99.99.1", "gateway.lvno.local")
+                                  }
+                                  runOnUiThread { result.success(matched) }
+                              }.start()
                           }
                           "scanQrNative" -> {
                               try {
@@ -442,6 +499,8 @@ jobs:
           class SmartClientEngine {
             String walletId = "";
             String currentHostId;
+            String currentHostName = "غير متصل بشبكة مفعلة";
+            String currentGatewayIp = "10.99.99.1";
             String currentDynamicSecret = "";
             bool isVpnActive = false;
             bool ecoMode = false;
@@ -456,6 +515,7 @@ jobs:
             int serverCreditBalanceYer = 0;
             double liveSpeedKbps = 0.0;
             int _saveTickCounter = 0;
+            int _routerVerifyTickCounter = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -548,20 +608,37 @@ jobs:
             Future<void> knockMikroTikGateway({required bool unlock}) async {
               final int port = unlock ? 9981 : 9982;
               try {
-                await http.get(Uri.parse('http://10.99.99.1:$port')).timeout(const Duration(milliseconds: 600));
+                await http.get(Uri.parse('http://$currentGatewayIp:$port')).timeout(const Duration(milliseconds: 600));
               } catch (_) {}
             }
 
-            Future<bool> verifyActiveHostNetwork(String hostId) async {
+            // البحث عن شبكة مفعلة في السيرفر والتحقق الفيزيائي من اتصال الجوال براوتر الميكروتك الخاص بها
+            Future<bool> discoverAndVerifyPhysicalNetwork() async {
               final db = FirebaseFirestore.instance;
-              final hostSnap = await db.collection('hosts').doc(hostId).get();
-              if (!hostSnap.exists) return false;
-              final hData = hostSnap.data()!;
-              final status = (hData['status'] ?? 'active').toString();
-              final bool approved = (hData['manual_admin_approved'] ?? true) == true;
-              currentDynamicSecret = (hData['activation_secret'] ?? 'MK-LVNO-2026').toString().trim();
-              currentHostId = hostId;
-              return status == 'active' && approved && currentDynamicSecret.isNotEmpty;
+              final snap = await db.collection('hosts').get();
+              for (final doc in snap.docs) {
+                final hData = doc.data();
+                final String status = (hData['status'] ?? 'inactive').toString();
+                final bool approved = (hData['manual_admin_approved'] ?? true) == true;
+                final String secret = (hData['activation_secret'] ?? '').toString().trim();
+                final String gwIp = (hData['gateway_ip'] ?? '10.99.99.1').toString().trim();
+
+                if (status == 'active' && approved && secret.isNotEmpty) {
+                  final bool isPhysicallyConnected = await _vpnChannel.invokeMethod<bool>('checkPhysicalRouter', {
+                    'gatewayIp': gwIp.isEmpty ? '10.99.99.1' : gwIp,
+                    'hostId': doc.id,
+                  }) ?? false;
+
+                  if (isPhysicallyConnected) {
+                    currentHostId = doc.id;
+                    currentHostName = (hData['network_name'] ?? doc.id).toString();
+                    currentGatewayIp = gwIp.isEmpty ? '10.99.99.1' : gwIp;
+                    currentDynamicSecret = secret;
+                    return true;
+                  }
+                }
+              }
+              return false;
             }
 
             Future<String> registerOrRecoverDeviceWallet() async {
@@ -569,10 +646,6 @@ jobs:
               final deviceId = await getDeviceHardwareId();
               await _ensureDefaultSystemSettings(db);
               await loadSavedQuotaState();
-
-              if (!await verifyActiveHostNetwork(currentHostId)) {
-                throw Exception("يتطلب التفعيل الاتصال بنقطة معتمدة ومفعلة");
-              }
 
               final devRef = db.collection('device_registry').doc(deviceId);
               final counterRef = db.collection('settings').doc('wallet_counter');
@@ -652,6 +725,7 @@ jobs:
                   'host_id': currentHostId,
                   'network_name': 'شبكة الهدى المفعلة',
                   'owner_wallet_id': '1001',
+                  'gateway_ip': '10.99.99.1',
                   'auto_transfer_to_wallet': false,
                   'activation_secret': 'MK-LVNO-2026',
                   'manual_admin_approved': true,
@@ -799,6 +873,18 @@ jobs:
                   await persistQuotaState();
                 }
 
+                // فحص دوري كل 10 ثوانٍ (50 نبضة) للتأكد من بقاء الجوال داخل شبكة الميكروتك المفعلة
+                _routerVerifyTickCounter++;
+                if (_routerVerifyTickCounter >= 50) {
+                  _routerVerifyTickCounter = 0;
+                  final stillOnRouter = await discoverAndVerifyPhysicalNetwork();
+                  if (!stillOnRouter) {
+                    await stopSmartConnection();
+                    return;
+                  }
+                  await knockMikroTikGateway(unlock: true);
+                }
+
                 final int remBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
                 int lowWaterMb = serverChunkSizeMb - serverRefillTriggerMb;
                 if (lowWaterMb < 5) lowWaterMb = 5;
@@ -881,9 +967,13 @@ jobs:
               if ((wData['parental_locked'] ?? false) == true) {
                 throw Exception("تم إيقاف الاستخدام مؤقتاً من قِبل المشرف العائلي");
               }
-              if (!await verifyActiveHostNetwork(currentHostId)) {
-                throw Exception("لا يمكن تشغيل النفق إلا على شبكة مفعلة");
+
+              // شرط صارم: يجب أن يرد راوتر الميكروتك المفعل ببصمته المحلية قبل فتح النفق
+              final bool onVerifiedMikroTik = await discoverAndVerifyPhysicalNetwork();
+              if (!onVerifiedMikroTik) {
+                throw Exception("⛔ لا يمكن تشغيل النفق! أنت غير متصل بشبكة ميكروتك مفعلة في النظام");
               }
+
               await syncDevicePolicyFromWalletDoc(wData);
 
               if ((activeChunkTotalBytes - activeChunkConsumedBytes) <= 512 * 1024) {
@@ -898,6 +988,7 @@ jobs:
 
             Future<void> stopSmartConnection() async {
               liveSpeedKbps = 0.0;
+              currentHostName = "غير متصل بشبكة مفعلة";
               await persistQuotaState();
               await knockMikroTikGateway(unlock: false);
               try {
@@ -1472,8 +1563,11 @@ jobs:
                       child: Column(
                         children: [
                           Text(
-                            widget.engine.isVpnActive ? "النفق المجزأ والعداد نشط (${widget.engine.liveSpeedKbps.toStringAsFixed(1)} KB/s)" : "الإنترنت مقفول (النفق متوقف)",
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                            widget.engine.isVpnActive
+                                ? "متصل بشبكة: ${widget.engine.currentHostName} (${widget.engine.liveSpeedKbps.toStringAsFixed(1)} KB/s)"
+                                : "الإنترنت مقفول (يتطلب شبكة ميكروتك مفعلة)",
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            textAlign: TextAlign.center,
                           ),
                           const SizedBox(height: 12),
                           Text(
@@ -1506,16 +1600,16 @@ jobs:
                                 try {
                                   if (!widget.engine.isVpnActive) {
                                     await widget.engine.startSmartConnection(w);
-                                    setState(() => _feedback = "✅ تم جلب الشفرة المتغيرة وفتح الإنترنت والعداد");
+                                    setState(() => _feedback = "✅ تم التحقق من بصمة الميكروتك وفتح النفق على (${widget.engine.currentHostName})");
                                   } else {
                                     await widget.engine.stopSmartConnection();
                                     setState(() => _feedback = "🔒 تم إيقاف الإنترنت وحفظ قراءة العداد");
                                   }
                                 } catch (e) {
-                                  setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
+                                  setState(() => _feedback = e.toString().replaceAll('Exception: ', ''));
                                 }
                               },
-                              child: Text(widget.engine.isVpnActive ? "إيقاف الإنترنت والنفق فوراً" : "تشغيل الإنترنت والعداد الآن"),
+                              child: Text(widget.engine.isVpnActive ? "إيقاف الإنترنت والنفق فوراً" : "فحص الشبكة وتشغيل النفق الآن"),
                             ),
                           ),
                           if (widget.engine.isVpnActive) ...[
