@@ -70,7 +70,7 @@ jobs:
           pubspec_txt = '''name: smartclient
           description: Unified Commercial Network App V6
           publish_to: 'none'
-          version: 6.0.0+15
+          version: 6.0.1+16
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -172,10 +172,9 @@ jobs:
                           .addRoute("10.99.99.0", 24)
                           .addRoute("10.88.0.0", 24)
 
-                      // تجزئة النفق: استثناء تطبيق المحفظة نفسه ليبقى على اتصال مباشر ومجاني بالسيرفر
                       try {
                           builder.addDisallowedApplication(packageName)
-                      } catch (_: Exception) {}
+                      } catch (e: Exception) {}
 
                       vpnInterface = builder.establish()
                       if (vpnInterface != null) {
@@ -221,7 +220,7 @@ jobs:
                   isRunning.set(false)
                   workerThread?.interrupt()
                   workerThread = null
-                  try { vpnInterface?.close() } catch (_: Exception) {}
+                  try { vpnInterface?.close() } catch (e: Exception) {}
                   vpnInterface = null
                   stopSelf()
               }
@@ -292,13 +291,13 @@ jobs:
                                       sock.connect(InetSocketAddress(gatewayIp, 53), 1200)
                                       sock.close()
                                       verified = true
-                                  } catch (_: Exception) {
+                                  } catch (e1: Exception) {
                                       try {
                                           val s2 = Socket()
                                           s2.connect(InetSocketAddress(gatewayIp, 80), 1200)
                                           s2.close()
                                           verified = true
-                                      } catch (_: Exception) {
+                                      } catch (e2: Exception) {
                                           verified = false
                                       }
                                   }
@@ -321,27 +320,27 @@ jobs:
                           "pollRealtimeDeltaBytes" -> {
                               if (!VpnTunnelService.isRunning.get()) {
                                   result.success(0)
-                                  return@setMethodCallHandler
-                              }
-                              var delta = VpnTunnelService.tunnelInspectorBytes.getAndSet(0L)
-                              val rx = TrafficStats.getTotalRxBytes()
-                              val tx = TrafficStats.getTotalTxBytes()
-                              val appRx = TrafficStats.getUidRxBytes(applicationInfo.uid)
-                              val appTx = TrafficStats.getUidTxBytes(applicationInfo.uid)
-                              if (rx > 0L && tx > 0L) {
-                                  val netTotal = rx + tx
-                                  val appTotal = if (appRx > 0L && appTx > 0L) (appRx + appTx) else 0L
-                                  val nowOtherAppsTotal = if (netTotal > appTotal) (netTotal - appTotal) else netTotal
-                                  if (VpnTunnelService.lastOsTotalBytes > 0L && nowOtherAppsTotal > VpnTunnelService.lastOsTotalBytes) {
-                                      val osDelta = nowOtherAppsTotal - VpnTunnelService.lastOsTotalBytes
-                                      if (osDelta > delta) {
-                                          delta = osDelta
+                              } else {
+                                  var delta = VpnTunnelService.tunnelInspectorBytes.getAndSet(0L)
+                                  val rx = TrafficStats.getTotalRxBytes()
+                                  val tx = TrafficStats.getTotalTxBytes()
+                                  val appRx = TrafficStats.getUidRxBytes(applicationInfo.uid)
+                                  val appTx = TrafficStats.getUidTxBytes(applicationInfo.uid)
+                                  if (rx > 0L && tx > 0L) {
+                                      val netTotal = rx + tx
+                                      val appTotal = if (appRx > 0L && appTx > 0L) (appRx + appTx) else 0L
+                                      val nowOtherAppsTotal = if (netTotal > appTotal) (netTotal - appTotal) else netTotal
+                                      if (VpnTunnelService.lastOsTotalBytes > 0L && nowOtherAppsTotal > VpnTunnelService.lastOsTotalBytes) {
+                                          val osDelta = nowOtherAppsTotal - VpnTunnelService.lastOsTotalBytes
+                                          if (osDelta > delta) {
+                                              delta = osDelta
+                                          }
                                       }
+                                      VpnTunnelService.lastOsTotalBytes = nowOtherAppsTotal
                                   }
-                                  VpnTunnelService.lastOsTotalBytes = nowOtherAppsTotal
+                                  val safeInt = if (delta > 2000000000L) 2000000000 else delta.toInt()
+                                  result.success(safeInt)
                               }
-                              val safeInt = if (delta > 2000000000L) 2000000000 else delta.toInt()
-                              result.success(safeInt)
                           }
                           "startVpn" -> {
                               pendingEcoMode = call.argument<Boolean>("ecoMode") ?: false
@@ -493,7 +492,7 @@ jobs:
             SmartClientEngine({required this.currentHostId});
 
             double get remainingChunkMb {
-              final rem = activeChunkTotalBytes - activeChunkConsumedBytes;
+              final int rem = activeChunkTotalBytes - activeChunkConsumedBytes;
               if (rem <= 0) return 0.0;
               return rem / (1024.0 * 1024.0);
             }
@@ -506,16 +505,26 @@ jobs:
               if (activeChunkTotalBytes <= 0) {
                 return serverCreditBalanceYer.toDouble();
               }
-              final double remRatio = (activeChunkTotalBytes - activeChunkConsumedBytes) / activeChunkTotalBytes;
-              final double clampedRatio = remRatio.clamp(0.0, 1.0);
-              final double remainingChunkValueYer = clampedRatio * currentChunkPriceYer;
+              double remRatio = (activeChunkTotalBytes - activeChunkConsumedBytes) / activeChunkTotalBytes;
+              if (remRatio < 0.0) remRatio = 0.0;
+              if (remRatio > 1.0) remRatio = 1.0;
+              final double remainingChunkValueYer = remRatio * currentChunkPriceYer;
               return serverCreditBalanceYer.toDouble() + remainingChunkValueYer;
             }
 
             double get currentSessionConsumedYer {
               if (activeChunkTotalBytes <= 0) return 0.0;
-              final double usedRatio = (activeChunkConsumedBytes / activeChunkTotalBytes).clamp(0.0, 1.0);
+              double usedRatio = activeChunkConsumedBytes / activeChunkTotalBytes;
+              if (usedRatio < 0.0) usedRatio = 0.0;
+              if (usedRatio > 1.0) usedRatio = 1.0;
               return usedRatio * currentChunkPriceYer;
+            }
+
+            int _computeLowWaterMarkBytes() {
+              int diffMb = serverChunkSizeMb - serverRefillTriggerMb;
+              if (diffMb < 5) diffMb = 5;
+              if (diffMb > 50) diffMb = 50;
+              return diffMb * 1024 * 1024;
             }
 
             Future<String> getDeviceHardwareId() async {
@@ -729,7 +738,6 @@ jobs:
               }
             }
 
-            // سحب الدفعة عبر المسار المفتوح + تحديث الشفرة المتغيرة + رفع تقرير استهلاك مفصل للشبكة
             Future<bool> purchaseQuotaChunkFromServer() async {
               if (isPurchasingChunk) return false;
               isPurchasingChunk = true;
@@ -801,7 +809,6 @@ jobs:
                     }, SetOptions(merge: true));
                   }
 
-                  // رفع تقرير استهلاك مفصل باسم الشبكة والمحفظة والشفرة المتغيرة
                   final logRef = db.collection('network_usage_logs').doc();
                   tx.set(logRef, {
                     'host_id': currentHostId,
@@ -824,7 +831,7 @@ jobs:
                   };
                 });
 
-                final int addedBytes = ((res['chunkMb'] as num).toInt() * 1024 * 1024);
+                final int addedBytes = ((res['chunkMb'] as num).toInt()) * 1024 * 1024;
                 final int prevRemainingBytes = (activeChunkTotalBytes - activeChunkConsumedBytes) > 0
                     ? (activeChunkTotalBytes - activeChunkConsumedBytes)
                     : 0;
@@ -997,7 +1004,8 @@ jobs:
               _fuelPumpTimer = Timer.periodic(const Duration(milliseconds: 250), (_) async {
                 if (!isVpnActive) return;
                 try {
-                  final int deltaBytes = await _vpnChannel.invokeMethod<int>('pollRealtimeDeltaBytes') ?? 0;
+                  final num? rawDelta = await _vpnChannel.invokeMethod<num>('pollRealtimeDeltaBytes');
+                  final int deltaBytes = rawDelta?.toInt() ?? 0;
                   _ticksCounter++;
 
                   if (deltaBytes > 0) {
@@ -1016,7 +1024,7 @@ jobs:
                   }
 
                   final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
-                  final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
+                  final int lowMarkBytes = _computeLowWaterMarkBytes();
 
                   if (remainingBytes <= lowMarkBytes && !isPurchasingChunk && serverCreditBalanceYer > 0) {
                     try {
@@ -1047,7 +1055,7 @@ jobs:
               await persistQuotaState();
 
               final int remainingBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
-              final int lowMarkBytes = ((serverChunkSizeMb - serverRefillTriggerMb).clamp(5, 50)) * 1024 * 1024;
+              final int lowMarkBytes = _computeLowWaterMarkBytes();
               if (remainingBytes <= lowMarkBytes && !isPurchasingChunk && serverCreditBalanceYer > 0) {
                 await purchaseQuotaChunkFromServer();
               }
@@ -1751,9 +1759,13 @@ jobs:
               final double usedMb = widget.engine.consumedChunkMb;
               final int chunkMaxMb = widget.engine.serverChunkSizeMb;
               final int triggerMb = widget.engine.serverRefillTriggerMb;
-              final double tankProgress = widget.engine.activeChunkTotalBytes > 0
-                  ? (remMb / chunkMaxMb).clamp(0.0, 1.0)
-                  : 0.0;
+
+              double tankProgress = 0.0;
+              if (widget.engine.activeChunkTotalBytes > 0 && chunkMaxMb > 0) {
+                tankProgress = remMb / chunkMaxMb;
+                if (tankProgress < 0.0) tankProgress = 0.0;
+                if (tankProgress > 1.0) tankProgress = 1.0;
+              }
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
