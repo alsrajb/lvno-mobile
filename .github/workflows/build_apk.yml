@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Complete LVNO V6 Project
+      - name: Generate Compact LVNO V6 Project
         shell: python
         run: |
           import os, shutil, json, subprocess, re, textwrap
@@ -72,7 +72,7 @@ jobs:
           name: smartclient
           description: Unified Commercial Network App
           publish_to: 'none'
-          version: 6.2.0+18
+          version: 6.3.0+19
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -128,11 +128,14 @@ jobs:
                   if (action == "UPDATE_POLICY") {
                       val eco = intent.getBooleanExtra("ecoMode", false)
                       val locked = intent.getBooleanExtra("parentalLocked", false)
-                      val blockedList = intent.getStringArrayListExtra("blockedDomains") ?: arrayListOf()
+                      val csv = intent.getStringExtra("blockedCsv") ?: ""
                       ecoModeEnabled.set(eco)
                       parentalLocked.set(locked)
                       blockedDomains.clear()
-                      blockedDomains.addAll(blockedList)
+                      for (part in csv.split(",")) {
+                          val d = part.trim()
+                          if (d.isNotEmpty()) blockedDomains.add(d)
+                      }
                       if (locked) stopVpnTunnel()
                       return START_STICKY
                   }
@@ -235,7 +238,6 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
-          import java.util.ArrayList
 
           class MainActivity: FlutterActivity() {
               private val CHANNEL = "com.lvno.smartclient/vpn"
@@ -297,12 +299,12 @@ jobs:
                           "updatePolicy" -> {
                               val eco = call.argument<Boolean>("ecoMode") ?: false
                               val locked = call.argument<Boolean>("parentalLocked") ?: false
-                              val blocked = call.argument<List<String>>("blockedDomains") ?: emptyList()
+                              val blockedCsv = call.argument<String>("blockedCsv") ?: ""
                               val intent = Intent(this, VpnTunnelService::class.java).apply {
                                   action = "UPDATE_POLICY"
                                   putExtra("ecoMode", eco)
                                   putExtra("parentalLocked", locked)
-                                  putStringArrayListExtra("blockedDomains", ArrayList(blocked))
+                                  putExtra("blockedCsv", blockedCsv)
                               }
                               startService(intent)
                               result.success(true)
@@ -391,12 +393,28 @@ jobs:
           </manifest>
           ''')
 
-          write_clean("lib/smart_client_core.dart", '''
+          main_code = '''
           import 'dart:async';
           import 'dart:convert';
+          import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
+          import 'package:firebase_core/firebase_core.dart';
+          import 'package:firebase_auth/firebase_auth.dart';
           import 'package:cloud_firestore/cloud_firestore.dart';
           import 'package:http/http.dart' as http;
+          import 'package:qr_flutter/qr_flutter.dart';
+
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(const LvnoCommercialApp());
+          }
+
+          InputDecoration _dec(String label) => InputDecoration(
+                labelText: label,
+                filled: true,
+                fillColor: const Color(0xFF0F172A),
+                border: const OutlineInputBorder(),
+              );
 
           class SmartClientEngine {
             String walletId = "";
@@ -416,38 +434,35 @@ jobs:
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
-            static const Map<String, List<String>> presetCategoryDomains = {
-              'games': ['roblox.com', 'pubgmobile.com', 'freefiremobile.com', 'epicgames.com', 'steampowered.com', 'supercell.com'],
-              'social': ['tiktok.com', 'instagram.com', 'facebook.com', 'snapchat.com', 'twitter.com', 'x.com'],
-              'video': ['youtube.com', 'googlevideo.com', 'netflix.com', 'twitch.tv', 'shahid.mbc.net'],
+            static const Map<String, String> presetCategoryCsv = {
+              'games': 'roblox.com,pubgmobile.com,freefiremobile.com,epicgames.com,steampowered.com',
+              'social': 'tiktok.com,instagram.com,facebook.com,snapchat.com,twitter.com,x.com',
+              'video': 'youtube.com,googlevideo.com,netflix.com,twitch.tv,shahid.mbc.net',
             };
 
             SmartClientEngine({required this.currentHostId});
 
             double get remainingChunkMb {
               final int rem = activeChunkTotalBytes - activeChunkConsumedBytes;
-              if (rem <= 0) return 0.0;
-              return rem / (1024.0 * 1024.0);
+              return rem <= 0 ? 0.0 : rem / (1024.0 * 1024.0);
             }
 
-            double get consumedChunkMb {
-              return activeChunkConsumedBytes / (1024.0 * 1024.0);
-            }
+            double get consumedChunkMb => activeChunkConsumedBytes / (1024.0 * 1024.0);
 
             double get fuelPumpRealtimeBalanceYer {
               if (activeChunkTotalBytes <= 0) return serverCreditBalanceYer.toDouble();
-              double remRatio = (activeChunkTotalBytes - activeChunkConsumedBytes) / activeChunkTotalBytes;
-              if (remRatio < 0.0) remRatio = 0.0;
-              if (remRatio > 1.0) remRatio = 1.0;
-              return serverCreditBalanceYer.toDouble() + (remRatio * currentChunkPriceYer);
+              double r = (activeChunkTotalBytes - activeChunkConsumedBytes) / activeChunkTotalBytes;
+              if (r < 0.0) r = 0.0;
+              if (r > 1.0) r = 1.0;
+              return serverCreditBalanceYer.toDouble() + (r * currentChunkPriceYer);
             }
 
             double get currentSessionConsumedYer {
               if (activeChunkTotalBytes <= 0) return 0.0;
-              double usedRatio = activeChunkConsumedBytes / activeChunkTotalBytes;
-              if (usedRatio < 0.0) usedRatio = 0.0;
-              if (usedRatio > 1.0) usedRatio = 1.0;
-              return usedRatio * currentChunkPriceYer;
+              double u = activeChunkConsumedBytes / activeChunkTotalBytes;
+              if (u < 0.0) u = 0.0;
+              if (u > 1.0) u = 1.0;
+              return u * currentChunkPriceYer;
             }
 
             Future<String> getDeviceHardwareId() async {
@@ -459,13 +474,14 @@ jobs:
               }
             }
 
-            Future> getLocalContacts() async {
+            Future getLocalContacts() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
-                final Map<String, dynamic> decoded = jsonDecode(raw);
-                final Map<String, String> out = {};
+                final Map decoded = jsonDecode(raw) as Map;
+                final Map out = {};
                 decoded.forEach((k, v) {
-                  if (!k.startsWith('__')) out[k] = v.toString();
+                  final ks = k.toString();
+                  if (!ks.startsWith('__')) out[ks] = v.toString();
                 });
                 return out;
               } catch (_) {
@@ -477,7 +493,7 @@ jobs:
               if (targetId.trim().isEmpty || aliasName.trim().isEmpty) return;
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
-                final Map<String, dynamic> decoded = jsonDecode(raw);
+                final Map decoded = jsonDecode(raw) as Map;
                 decoded[targetId.trim()] = aliasName.trim();
                 await _vpnChannel.invokeMethod('saveLocalContactsJson', {'json': jsonEncode(decoded)});
               } catch (_) {}
@@ -486,7 +502,7 @@ jobs:
             Future<void> loadSavedQuotaState() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
-                final Map<String, dynamic> decoded = jsonDecode(raw);
+                final Map decoded = jsonDecode(raw) as Map;
                 activeChunkTotalBytes = int.tryParse((decoded['__q_total__'] ?? '0').toString()) ?? 0;
                 activeChunkConsumedBytes = int.tryParse((decoded['__q_used__'] ?? '0').toString()) ?? 0;
                 currentChunkPriceYer = double.tryParse((decoded['__q_price__'] ?? '25.0').toString()) ?? 25.0;
@@ -496,7 +512,7 @@ jobs:
             Future<void> persistQuotaState() async {
               try {
                 final raw = await _vpnChannel.invokeMethod<String>('getLocalContactsJson') ?? '{}';
-                final Map<String, dynamic> decoded = jsonDecode(raw);
+                final Map decoded = jsonDecode(raw) as Map;
                 decoded['__q_total__'] = activeChunkTotalBytes.toString();
                 decoded['__q_used__'] = activeChunkConsumedBytes.toString();
                 decoded['__q_price__'] = currentChunkPriceYer.toStringAsFixed(3);
@@ -558,32 +574,32 @@ jobs:
                 if (counterSnap.exists && counterSnap.data()?['last_wallet_number'] != null) {
                   nextId = ((counterSnap.data()!['last_wallet_number'] as num).toInt()) + 1;
                 }
-                int generalMaxBalance = 10000;
-                int generalDailyLimit = 5000;
+                int maxBal = 10000;
+                int dailyLim = 5000;
                 if (configSnap.exists) {
-                  generalMaxBalance = ((configSnap.data()?['general_tier_max_balance_yer'] ?? 10000) as num).toInt();
-                  generalDailyLimit = ((configSnap.data()?['general_tier_daily_limit_yer'] ?? 5000) as num).toInt();
+                  maxBal = ((configSnap.data()?['general_tier_max_balance_yer'] ?? 10000) as num).toInt();
+                  dailyLim = ((configSnap.data()?['general_tier_daily_limit_yer'] ?? 5000) as num).toInt();
                 }
 
-                final newWalletId = nextId.toString();
+                final newId = nextId.toString();
                 tx.set(counterRef, {'last_wallet_number': nextId}, SetOptions(merge: true));
                 tx.set(devRef, {
                   'device_id': deviceId,
-                  'wallet_id': newWalletId,
+                  'wallet_id': newId,
                   'registered_host_id': currentHostId,
                   'created_at': FieldValue.serverTimestamp(),
                 });
-                tx.set(db.collection('wallets').doc(newWalletId), {
-                  'wallet_id': newWalletId,
+                tx.set(db.collection('wallets').doc(newId), {
+                  'wallet_id': newId,
                   'device_id': deviceId,
-                  'display_name': 'حساب $newWalletId',
+                  'display_name': 'حساب $newId',
                   'full_name': '',
                   'cash_balance_yer': 0,
                   'credit_balance_yer': 0,
                   'tier': 'general',
                   'kyc_verified': false,
-                  'custom_max_balance_yer': generalMaxBalance,
-                  'custom_daily_limit_yer': generalDailyLimit,
+                  'custom_max_balance_yer': maxBal,
+                  'custom_daily_limit_yer': dailyLim,
                   'daily_transferred_today': 0,
                   'eco_mode': false,
                   'parent_wallet_id': '',
@@ -594,8 +610,8 @@ jobs:
                   'custom_blocked_domains': <String>[],
                   'created_at': FieldValue.serverTimestamp(),
                 });
-                walletId = newWalletId;
-                return newWalletId;
+                walletId = newId;
+                return newId;
               });
             }
 
@@ -744,7 +760,8 @@ jobs:
             Future<void> pollAndConsumeTrafficTick() async {
               if (!isVpnActive) return;
               try {
-                final res = await _vpnChannel.invokeMapMethod<String, dynamic>('getTrafficStats');
+                final raw = await _vpnChannel.invokeMethod('getTrafficStats');
+                final Map? res = raw as Map?;
                 final int wBytes = ((res?['wanBytes'] ?? 0) as num).toInt();
                 final int cBytes = ((res?['cacheBytes'] ?? 0) as num).toInt();
                 final int delta = wBytes + cBytes;
@@ -839,23 +856,18 @@ jobs:
               final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt();
               final bool timeExpired = (limitMins > 0 && usedMins >= limitMins);
 
-              final List<dynamic> cats = (wData['blocked_categories'] as List<dynamic>?) ?? [];
-              final List<dynamic> customDoms = (wData['custom_blocked_domains'] as List<dynamic>?) ?? [];
-
-              final Set<String> compiledDomains = {};
+              final List cats = (wData['blocked_categories'] as List?) ?? [];
+              final List<String> parts = [];
               for (final c in cats) {
-                final list = presetCategoryDomains[c.toString()];
-                if (list != null) compiledDomains.addAll(list);
-              }
-              for (final d in customDoms) {
-                if (d.toString().trim().isNotEmpty) compiledDomains.add(d.toString().trim().toLowerCase());
+                final csv = presetCategoryCsv[c.toString()];
+                if (csv != null && csv.isNotEmpty) parts.add(csv);
               }
 
               try {
                 await _vpnChannel.invokeMethod('updatePolicy', {
                   'ecoMode': ecoMode,
                   'parentalLocked': locked || timeExpired,
-                  'blockedDomains': compiledDomains.toList(),
+                  'blockedCsv': parts.join(','),
                 });
                 if (locked || timeExpired) isVpnActive = false;
               } catch (_) {}
@@ -864,11 +876,6 @@ jobs:
             Future<bool> startSmartConnection(Map<String, dynamic> wData) async {
               if ((wData['parental_locked'] ?? false) == true) {
                 throw Exception("تم إيقاف الاستخدام مؤقتاً من قِبل المشرف العائلي");
-              }
-              final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
-              final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt();
-              if (limitMins > 0 && usedMins >= limitMins) {
-                throw Exception("انتهى وقت الاستخدام اليومي المخصص لهذا الجهاز");
               }
               if (!await verifyActiveHostNetwork(currentHostId)) {
                 throw Exception("لا يمكن تشغيل النفق إلا على شبكة مفعلة");
@@ -1056,21 +1063,6 @@ jobs:
               return result;
             }
           }
-          ''')
-
-          main_code = '''
-          import 'dart:async';
-          import 'package:flutter/material.dart';
-          import 'package:firebase_core/firebase_core.dart';
-          import 'package:firebase_auth/firebase_auth.dart';
-          import 'package:cloud_firestore/cloud_firestore.dart';
-          import 'package:qr_flutter/qr_flutter.dart';
-          import 'smart_client_core.dart';
-
-          void main() {
-            WidgetsFlutterBinding.ensureInitialized();
-            runApp(const LvnoCommercialApp());
-          }
 
           class LvnoCommercialApp extends StatelessWidget {
             const LvnoCommercialApp({super.key});
@@ -1160,9 +1152,7 @@ jobs:
                         children: [
                           const Icon(Icons.error_outline, color: Colors.amber, size: 54),
                           const SizedBox(height: 14),
-                          const Text("تنبيه التفعيل", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 8),
-                          Text(_errorMsg!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                          Text(_errorMsg!, textAlign: TextAlign.center),
                           const SizedBox(height: 20),
                           ElevatedButton(
                             onPressed: () {
@@ -1179,16 +1169,7 @@ jobs:
               }
               if (!_isReady) {
                 return const Scaffold(
-                  body: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        CircularProgressIndicator(color: Color(0xFF10B981)),
-                        SizedBox(height: 16),
-                        Text("جاري فتح المسار المباشر والتحقق من الشبكة...", style: TextStyle(fontSize: 15)),
-                      ],
-                    ),
-                  ),
+                  body: Center(child: CircularProgressIndicator(color: Color(0xFF10B981))),
                 );
               }
               return MainCommercialShell(engine: _engine);
@@ -1210,7 +1191,7 @@ jobs:
             final TextEditingController _searchContactCtrl = TextEditingController();
             String _transferMode = "cash";
             String _feedback = "";
-            Map<String, String> _localContacts = {};
+            Map _localContacts = {};
             String _searchQuery = "";
             Timer? _uiFuelTimer;
 
@@ -1237,34 +1218,6 @@ jobs:
               if (mounted) setState(() => _localContacts = map);
             }
 
-            Future<String?> _openQrScannerModal(String title) async {
-              final nativeScan = await widget.engine.tryScanQrNative();
-              if (nativeScan.trim().isNotEmpty) return nativeScan.trim();
-              final manualCtrl = TextEditingController();
-              if (!mounted) return null;
-              return await showDialog<String>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  backgroundColor: const Color(0xFF1E293B),
-                  title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  content: TextField(
-                    controller: manualCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "أدخل رقم الحساب (مثال: 1002)",
-                      filled: true,
-                      fillColor: Color(0xFF0F172A),
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("إلغاء")),
-                    ElevatedButton(onPressed: () => Navigator.pop(ctx, manualCtrl.text.trim()), child: const Text("تأكيد")),
-                  ],
-                ),
-              );
-            }
-
             @override
             Widget build(BuildContext context) {
               final db = FirebaseFirestore.instance;
@@ -1281,17 +1234,13 @@ jobs:
 
                   final int cashBal = ((w['cash_balance_yer'] ?? 0) as num).toInt();
                   final bool ecoMode = (w['eco_mode'] ?? false) == true;
-                  final bool kyc = (w['kyc_verified'] ?? false) == true;
                   final String fullName = (w['full_name'] ?? '').toString().trim();
-                  final List<dynamic> linkedChildren = (w['linked_children'] as List<dynamic>?) ?? [];
+                  final List linkedChildren = (w['linked_children'] as List?) ?? [];
 
                   return Scaffold(
                     appBar: AppBar(
                       backgroundColor: const Color(0xFF0F172A),
-                      title: Text(
-                        fullName.isNotEmpty ? "$fullName (#$myId)" : "حساب رقم #$myId",
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
-                      ),
+                      title: Text(fullName.isNotEmpty ? "$fullName (#$myId)" : "حساب رقم #$myId"),
                       actions: [
                         IconButton(
                           icon: const Icon(Icons.qr_code_2, color: Color(0xFF10B981)),
@@ -1318,10 +1267,10 @@ jobs:
                           child: IndexedStack(
                             index: _currentTab,
                             children: [
-                              _buildBalanceAndTransferTab(myId, cashBal, kyc),
-                              _buildFuelPumpTunnelTab(w, ecoMode),
-                              _buildParentalControlTab(myId, linkedChildren),
-                              _buildContactsAndHostWalletTab(myId),
+                              _buildBalanceTab(myId, cashBal),
+                              _buildFuelPumpTab(w, ecoMode),
+                              _buildParentalTab(linkedChildren),
+                              _buildManagementTab(myId),
                             ],
                           ),
                         ),
@@ -1332,10 +1281,10 @@ jobs:
                       selectedIndex: _currentTab,
                       onDestinationSelected: (idx) => setState(() => _currentTab = idx),
                       destinations: const [
-                        NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'الرصيد'),
-                        NavigationDestination(icon: Icon(Icons.local_gas_station_outlined), selectedIcon: Icon(Icons.local_gas_station), label: 'النفق والعداد'),
-                        NavigationDestination(icon: Icon(Icons.family_restroom_outlined), selectedIcon: Icon(Icons.family_restroom), label: 'التحكم'),
-                        NavigationDestination(icon: Icon(Icons.manage_accounts_outlined), selectedIcon: Icon(Icons.manage_accounts), label: 'الإدارة'),
+                        NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), label: 'الرصيد'),
+                        NavigationDestination(icon: Icon(Icons.local_gas_station_outlined), label: 'النفق والعداد'),
+                        NavigationDestination(icon: Icon(Icons.family_restroom_outlined), label: 'التحكم'),
+                        NavigationDestination(icon: Icon(Icons.manage_accounts_outlined), label: 'الإدارة'),
                       ],
                     ),
                   );
@@ -1343,12 +1292,13 @@ jobs:
               );
             }
 
-            Widget _buildBalanceAndTransferTab(String myId, int cashBal, bool kyc) {
-              final filteredContacts = _localContacts.entries.where((e) {
-                if (_searchQuery.trim().isEmpty) return true;
-                return e.value.contains(_searchQuery) || e.key.contains(_searchQuery);
-              }).toList();
+            Widget _buildBalanceTab(String myId, int cashBal) {
               final double liveCredit = widget.engine.fuelPumpRealtimeBalanceYer;
+              final List contactKeys = _localContacts.keys.where((k) {
+                if (_searchQuery.trim().isEmpty) return true;
+                final v = _localContacts[k].toString();
+                return v.contains(_searchQuery) || k.toString().contains(_searchQuery);
+              }).toList();
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
@@ -1357,10 +1307,7 @@ jobs:
                   children: [
                     Container(
                       padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(colors: [Color(0xFF065F46), Color(0xFF0F172A)]),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
+                      decoration: BoxDecoration(color: const Color(0xFF065F46), borderRadius: BorderRadius.circular(20)),
                       child: Row(
                         children: [
                           Expanded(
@@ -1368,23 +1315,16 @@ jobs:
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 const Text("الرصيد النقدي", style: TextStyle(fontSize: 12, color: Colors.white70)),
-                                const SizedBox(height: 4),
-                                Text("$cashBal ريال", style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
+                                Text("$cashBal ريال", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                               ],
                             ),
                           ),
-                          Container(width: 1, height: 48, color: Colors.white24),
-                          const SizedBox(width: 14),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 const Text("عداد رصيد الاستخدام", style: TextStyle(fontSize: 12, color: Color(0xFF6EE7B7))),
-                                const SizedBox(height: 4),
-                                Text(
-                                  "${liveCredit.toStringAsFixed(3)} ريال",
-                                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, fontFamily: 'monospace', color: Color(0xFF6EE7B7)),
-                                ),
+                                Text("${liveCredit.toStringAsFixed(3)} ريال", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, fontFamily: 'monospace', color: Color(0xFF6EE7B7))),
                               ],
                             ),
                           ),
@@ -1398,15 +1338,12 @@ jobs:
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          const Text("تحويل الرصيد", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          const SizedBox(height: 12),
                           Row(
                             children: [
                               Expanded(
                                 child: ChoiceChip(
-                                  label: const Text("تحويل نقدي (0%)"),
+                                  label: const Text("تحويل نقدي"),
                                   selected: _transferMode == 'cash',
-                                  selectedColor: const Color(0xFF3B82F6),
                                   onSelected: (_) => setState(() => _transferMode = 'cash'),
                                 ),
                               ),
@@ -1415,38 +1352,15 @@ jobs:
                                 child: ChoiceChip(
                                   label: const Text("تغذية رصيد استخدام"),
                                   selected: _transferMode == 'credit',
-                                  selectedColor: const Color(0xFF10B981),
                                   onSelected: (_) => setState(() => _transferMode = 'credit'),
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 10),
                           Row(
                             children: [
-                              Expanded(
-                                child: TextField(
-                                  controller: _receiverCtrl,
-                                  keyboardType: TextInputType.number,
-                                  decoration: const InputDecoration(
-                                    labelText: "رقم الحساب المستلم",
-                                    filled: true,
-                                    fillColor: Color(0xFF0F172A),
-                                    border: OutlineInputBorder(),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              IconButton.filled(
-                                style: IconButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.black),
-                                icon: const Icon(Icons.qr_code_scanner),
-                                onPressed: () async {
-                                  final code = await _openQrScannerModal("مسح رمز الحساب");
-                                  if (code != null && code.isNotEmpty) {
-                                    setState(() => _receiverCtrl.text = code.replaceAll('LINK:', '').trim());
-                                  }
-                                },
-                              ),
+                              Expanded(child: TextField(controller: _receiverCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم الحساب المستلم"))),
                               TextButton(
                                 onPressed: () => setState(() {
                                   _receiverCtrl.text = myId;
@@ -1457,23 +1371,9 @@ jobs:
                             ],
                           ),
                           const SizedBox(height: 10),
-                          TextField(
-                            controller: _amountCtrl,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                              labelText: "المبلغ بالريال",
-                              filled: true,
-                              fillColor: Color(0xFF0F172A),
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
+                          TextField(controller: _amountCtrl, keyboardType: TextInputType.number, decoration: _dec("المبلغ بالريال")),
                           const SizedBox(height: 12),
                           ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: _transferMode == 'cash' ? const Color(0xFF3B82F6) : const Color(0xFF10B981),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                            ),
                             onPressed: () async {
                               try {
                                 final amt = int.tryParse(_amountCtrl.text.trim()) ?? 0;
@@ -1484,60 +1384,40 @@ jobs:
                                 );
                                 await _loadContacts();
                                 setState(() {
-                                  if (_transferMode == 'cash') {
-                                    _feedback = "✅ تم تحويل $amt ريال نقدي بنجاح";
-                                  } else {
-                                    _feedback = "✅ تمت التغذية! خُصم ${res['net_deducted']} ريال وأُضيف ${res['credit_delivered']} ريال رصيد استخدام";
-                                  }
+                                  _feedback = _transferMode == 'cash'
+                                      ? "✅ تم تحويل $amt ريال نقدي"
+                                      : "✅ خُصم ${res['net_deducted']} ريال وأُضيف ${res['credit_delivered']} ريال رصيد استخدام";
                                 });
                               } catch (e) {
                                 setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                               }
                             },
-                            child: const Text("تنفيذ العملية", style: TextStyle(fontWeight: FontWeight.bold)),
+                            child: const Text("تنفيذ العملية"),
                           ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Text("قائمة التحويل السريع", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: _searchContactCtrl,
-                            decoration: const InputDecoration(
-                              hintText: "ابحث بالاسم أو الرقم...",
-                              prefixIcon: Icon(Icons.search),
-                              filled: true,
-                              fillColor: Color(0xFF0F172A),
-                              border: OutlineInputBorder(),
-                            ),
-                            onChanged: (v) => setState(() => _searchQuery = v),
-                          ),
-                          for (final entry in filteredContacts)
-                            ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              title: Text(entry.value, style: const TextStyle(fontWeight: FontWeight.bold)),
-                              subtitle: Text("حساب #${entry.key}"),
-                              trailing: ElevatedButton(
-                                onPressed: () => setState(() => _receiverCtrl.text = entry.key),
-                                child: const Text("اختيار"),
-                              ),
-                            ),
-                        ],
-                      ),
+                    TextField(
+                      controller: _searchContactCtrl,
+                      decoration: _dec("بحث في القائمة المحلية..."),
+                      onChanged: (v) => setState(() => _searchQuery = v),
                     ),
+                    for (final k in contactKeys)
+                      ListTile(
+                        title: Text(_localContacts[k].toString()),
+                        subtitle: Text("حساب #$k"),
+                        trailing: ElevatedButton(
+                          onPressed: () => setState(() => _receiverCtrl.text = k.toString()),
+                          child: const Text("اختيار"),
+                        ),
+                      ),
                   ],
                 ),
               );
             }
 
-            Widget _buildFuelPumpTunnelTab(Map<String, dynamic> w, bool ecoMode) {
+            Widget _buildFuelPumpTab(Map<String, dynamic> w, bool ecoMode) {
               final double liveBalanceYer = widget.engine.fuelPumpRealtimeBalanceYer;
               final double sessionSpentYer = widget.engine.currentSessionConsumedYer;
               final double remMb = widget.engine.remainingChunkMb;
@@ -1558,76 +1438,40 @@ jobs:
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Container(
-                      padding: const EdgeInsets.all(22),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E293B),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(
-                          color: widget.engine.isVpnActive ? const Color(0xFF10B981) : Colors.white12,
-                          width: 2,
-                        ),
-                      ),
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(20)),
                       child: Column(
                         children: [
                           Text(
                             widget.engine.isVpnActive ? "النفق المجزأ والعداد نشط" : "الإنترنت مقفول (النفق متوقف)",
                             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                           ),
-                          const SizedBox(height: 16),
-                          const Text("الرصيد المتبقي اللحظي (عداد البنزين بالفاصلة)", style: TextStyle(fontSize: 12, color: Colors.white60)),
-                          const SizedBox(height: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF020617),
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: Text(
-                              "${liveBalanceYer.toStringAsFixed(3)} ريال",
-                              style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, fontFamily: 'monospace', color: Color(0xFF10B981)),
-                            ),
+                          const SizedBox(height: 12),
+                          Text(
+                            "${liveBalanceYer.toStringAsFixed(3)} ريال",
+                            style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, fontFamily: 'monospace', color: Color(0xFF10B981)),
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
-                              Column(
-                                children: [
-                                  const Text("صرف الدفعة", style: TextStyle(fontSize: 11, color: Colors.white54)),
-                                  Text("${sessionSpentYer.toStringAsFixed(3)} ريال", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.amber)),
-                                ],
-                              ),
-                              Column(
-                                children: [
-                                  const Text("المستهلك", style: TextStyle(fontSize: 11, color: Colors.white54)),
-                                  Text("${usedMb.toStringAsFixed(2)} MB", style: const TextStyle(fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                              Column(
-                                children: [
-                                  const Text("متبقي بالخزان", style: TextStyle(fontSize: 11, color: Colors.white54)),
-                                  Text("${remMb.toStringAsFixed(2)} MB", style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF6EE7B7))),
-                                ],
-                              ),
+                              Text("الصرف: ${sessionSpentYer.toStringAsFixed(3)} ريال", style: const TextStyle(color: Colors.amber)),
+                              Text("مستهلك: ${usedMb.toStringAsFixed(2)} MB"),
+                              Text("متبقي: ${remMb.toStringAsFixed(2)} MB", style: const TextStyle(color: Color(0xFF6EE7B7))),
                             ],
                           ),
-                          const SizedBox(height: 14),
-                          LinearProgressIndicator(
-                            value: tankProgress,
-                            minHeight: 8,
-                            backgroundColor: Colors.white12,
-                            color: const Color(0xFF10B981),
-                          ),
+                          const SizedBox(height: 12),
+                          LinearProgressIndicator(value: tankProgress, minHeight: 8, color: const Color(0xFF10B981)),
                           const SizedBox(height: 6),
-                          Text("الدفعة: $chunkMaxMb MB | التجديد التلقائي عند استهلاك: $triggerMb MB", style: const TextStyle(fontSize: 11, color: Colors.white54)),
-                          const SizedBox(height: 18),
+                          Text("الدفعة: $chunkMaxMb MB | التجديد التلقائي عند: $triggerMb MB", style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                          const SizedBox(height: 16),
                           SizedBox(
                             width: double.infinity,
                             child: ElevatedButton(
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: widget.engine.isVpnActive ? Colors.redAccent : const Color(0xFF10B981),
                                 foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                padding: const EdgeInsets.symmetric(vertical: 14),
                               ),
                               onPressed: () async {
                                 try {
@@ -1642,17 +1486,12 @@ jobs:
                                   setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                                 }
                               },
-                              child: Text(
-                                widget.engine.isVpnActive ? "إيقاف الإنترنت والنفق فوراً" : "تشغيل الإنترنت والعداد الآن",
-                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                              ),
+                              child: Text(widget.engine.isVpnActive ? "إيقاف الإنترنت والنفق فوراً" : "تشغيل الإنترنت والعداد الآن"),
                             ),
                           ),
                           if (widget.engine.isVpnActive) ...[
                             const SizedBox(height: 10),
-                            OutlinedButton.icon(
-                              icon: const Icon(Icons.speed, color: Colors.amber, size: 18),
-                              label: const Text("اختبار سحب 25 MB لرؤية حركة الفاصلة والشراء عند 80 MB", style: TextStyle(fontSize: 12)),
+                            OutlinedButton(
                               onPressed: () async {
                                 try {
                                   await widget.engine.simulateFastFuelConsumption(25);
@@ -1661,85 +1500,62 @@ jobs:
                                   setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
                                 }
                               },
+                              child: const Text("اختبار سحب 25 MB لرؤية حركة الفاصلة والشراء عند 80 MB"),
                             ),
                           ],
                         ],
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
-                      child: SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text("الوضع الاقتصادي لتوفير الرصيد", style: TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: const Text("خفض تلقائي لجودة الفيديو لإبطاء دوران عداد الاستهلاك", style: TextStyle(fontSize: 12, color: Colors.white70)),
-                        value: ecoMode,
-                        onChanged: (val) async {
-                          await widget.engine.toggleMyEcoMode(val);
-                          setState(() => _feedback = val ? "✅ تم تفعيل الوضع الاقتصادي" : "تم إيقاف الوضع الاقتصادي");
-                        },
-                      ),
+                    SwitchListTile(
+                      title: const Text("الوضع الاقتصادي لتوفير الرصيد"),
+                      value: ecoMode,
+                      onChanged: (val) async {
+                        await widget.engine.toggleMyEcoMode(val);
+                        setState(() => _feedback = val ? "✅ تم تفعيل الوضع الاقتصادي" : "تم إيقاف الوضع الاقتصادي");
+                      },
                     ),
                   ],
                 ),
               );
             }
 
-            Widget _buildParentalControlTab(String myId, List<dynamic> linkedChildren) {
-              final TextEditingController childIdCtrl = TextEditingController();
-              final TextEditingController childNameCtrl = TextEditingController();
+            Widget _buildParentalTab(List linkedChildren) {
+              final childIdCtrl = TextEditingController();
+              final childNameCtrl = TextEditingController();
 
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Text("ربط جهاز فرد من العائلة", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: childIdCtrl,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(labelText: "رقم حساب الجهاز", filled: true, fillColor: Color(0xFF0F172A), border: OutlineInputBorder()),
-                          ),
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: childNameCtrl,
-                            decoration: const InputDecoration(labelText: "الاسم المحلي على جهازك", filled: true, fillColor: Color(0xFF0F172A), border: OutlineInputBorder()),
-                          ),
-                          const SizedBox(height: 12),
-                          ElevatedButton(
-                            onPressed: () async {
-                              try {
-                                await widget.engine.linkFamilyMemberDevice(childIdCtrl.text, childNameCtrl.text);
-                                await _loadContacts();
-                                setState(() => _feedback = "✅ تم ربط الجهاز بنجاح");
-                              } catch (e) {
-                                setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
-                              }
-                            },
-                            child: const Text("ربط الجهاز وإضافته للرقابة"),
-                          ),
-                        ],
-                      ),
+                    TextField(controller: childIdCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم حساب جهاز العائلة")),
+                    const SizedBox(height: 8),
+                    TextField(controller: childNameCtrl, decoration: _dec("الاسم المحلي على جهازك")),
+                    const SizedBox(height: 10),
+                    ElevatedButton(
+                      onPressed: () async {
+                        try {
+                          await widget.engine.linkFamilyMemberDevice(childIdCtrl.text, childNameCtrl.text);
+                          await _loadContacts();
+                          setState(() => _feedback = "✅ تم ربط الجهاز بنجاح");
+                        } catch (e) {
+                          setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
+                        }
+                      },
+                      child: const Text("ربط الجهاز وإضافته للرقابة"),
                     ),
                     const SizedBox(height: 16),
                     for (final cid in linkedChildren)
-                      _buildChildControlCard(cid.toString()),
+                      _buildChildCard(cid.toString()),
                   ],
                 ),
               );
             }
 
-            Widget _buildChildControlCard(String childId) {
+            Widget _buildChildCard(String childId) {
               final db = FirebaseFirestore.instance;
-              final localName = _localContacts[childId] ?? "جهاز #$childId";
+              final localName = (_localContacts[childId] ?? "جهاز #$childId").toString();
 
               return StreamBuilder<DocumentSnapshot>(
                 stream: db.collection('wallets').doc(childId).snapshots(),
@@ -1748,63 +1564,23 @@ jobs:
                   final c = snap.data!.data() as Map<String, dynamic>;
                   final bool locked = (c['parental_locked'] ?? false) == true;
                   final bool childEco = (c['eco_mode'] ?? false) == true;
-                  final List<String> blockedCats = List<String>.from((c['blocked_categories'] as List<dynamic>?) ?? []);
 
                   return Container(
-                    margin: const EdgeInsets.only(bottom: 14),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(14)),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text("$localName (#$childId)", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF6EE7B7))),
-                            Switch(
-                              value: !locked,
-                              onChanged: (allow) => db.collection('wallets').doc(childId).update({'parental_locked': !allow}),
-                            ),
-                          ],
+                        SwitchListTile(
+                          title: Text("$localName (#$childId)"),
+                          subtitle: Text(locked ? "مقفل حالياً" : "مسموح بالاستخدام"),
+                          value: !locked,
+                          onChanged: (allow) => db.collection('wallets').doc(childId).update({'parental_locked': !allow}),
                         ),
                         SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          dense: true,
                           title: const Text("فرض الوضع الاقتصادي"),
                           value: childEco,
                           onChanged: (v) => db.collection('wallets').doc(childId).update({'eco_mode': v}),
-                        ),
-                        Wrap(
-                          spacing: 8,
-                          children: [
-                            FilterChip(
-                              label: const Text("حظر الألعاب"),
-                              selected: blockedCats.contains('games'),
-                              onSelected: (sel) {
-                                final next = List<String>.from(blockedCats);
-                                sel ? next.add('games') : next.remove('games');
-                                db.collection('wallets').doc(childId).update({'blocked_categories': next});
-                              },
-                            ),
-                            FilterChip(
-                              label: const Text("حظر التواصل"),
-                              selected: blockedCats.contains('social'),
-                              onSelected: (sel) {
-                                final next = List<String>.from(blockedCats);
-                                sel ? next.add('social') : next.remove('social');
-                                db.collection('wallets').doc(childId).update({'blocked_categories': next});
-                              },
-                            ),
-                            FilterChip(
-                              label: const Text("حظر الفيديو"),
-                              selected: blockedCats.contains('video'),
-                              onSelected: (sel) {
-                                final next = List<String>.from(blockedCats);
-                                sel ? next.add('video') : next.remove('video');
-                                db.collection('wallets').doc(childId).update({'blocked_categories': next});
-                              },
-                            ),
-                          ],
                         ),
                       ],
                     ),
@@ -1813,7 +1589,7 @@ jobs:
               );
             }
 
-            Widget _buildContactsAndHostWalletTab(String myId) {
+            Widget _buildManagementTab(String myId) {
               final idCtrl = TextEditingController();
               final nameCtrl = TextEditingController();
               final db = FirebaseFirestore.instance;
@@ -1827,7 +1603,7 @@ jobs:
                       stream: db.collection('hosts').where('owner_wallet_id', isEqualTo: myId).snapshots(),
                       builder: (context, hostSnap) {
                         if (!hostSnap.hasData || hostSnap.data!.docs.isEmpty) return const SizedBox.shrink();
-                        final List<Widget> cards = [];
+                        final cards = <Widget>[];
                         for (final doc in hostSnap.data!.docs) {
                           final h = doc.data() as Map<String, dynamic>;
                           final String hostId = doc.id;
@@ -1844,14 +1620,12 @@ jobs:
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text("📡 مستحقات شبكتي: $netName", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                                  const SizedBox(height: 6),
-                                  Text("إجمالي الدفعات المباعة: ${wanMb.toStringAsFixed(0)} MB", style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                                  Text("📡 مستحقات شبكتي: $netName", style: const TextStyle(fontWeight: FontWeight.bold)),
+                                  Text("إجمالي الدفعات المباعة: ${wanMb.toStringAsFixed(0)} MB"),
                                   Text("الرصيد المتاح للسحب: $dueYer ريال", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.amber)),
                                   SwitchListTile(
                                     contentPadding: EdgeInsets.zero,
-                                    dense: true,
-                                    title: const Text("تحويل المستحقات تلقائياً إلى محفظتي", style: TextStyle(fontSize: 13)),
+                                    title: const Text("تحويل المستحقات تلقائياً إلى محفظتي"),
                                     value: autoTransfer,
                                     onChanged: (val) async {
                                       await widget.engine.toggleHostAutoTransfer(hostId, val);
@@ -1879,28 +1653,17 @@ jobs:
                         return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: cards);
                       },
                     ),
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Text("حفظ جهة في القائمة المحلية", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          const SizedBox(height: 10),
-                          TextField(controller: idCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "رقم الحساب (مثال: 1002)", filled: true, fillColor: Color(0xFF0F172A), border: OutlineInputBorder())),
-                          const SizedBox(height: 10),
-                          TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "الاسم المحلي", filled: true, fillColor: Color(0xFF0F172A), border: OutlineInputBorder())),
-                          const SizedBox(height: 12),
-                          ElevatedButton(
-                            onPressed: () async {
-                              await widget.engine.saveLocalContact(idCtrl.text, nameCtrl.text);
-                              await _loadContacts();
-                              setState(() => _feedback = "✅ تم حفظ الاسم محلياً");
-                            },
-                            child: const Text("حفظ في قائمتي المحلية"),
-                          ),
-                        ],
-                      ),
+                    TextField(controller: idCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم الحساب للحفظ محلياً (مثال: 1002)")),
+                    const SizedBox(height: 8),
+                    TextField(controller: nameCtrl, decoration: _dec("الاسم المحلي")),
+                    const SizedBox(height: 10),
+                    ElevatedButton(
+                      onPressed: () async {
+                        await widget.engine.saveLocalContact(idCtrl.text, nameCtrl.text);
+                        await _loadContacts();
+                        setState(() => _feedback = "✅ تم حفظ الاسم محلياً");
+                      },
+                      child: const Text("حفظ في قائمتي المحلية"),
                     ),
                   ],
                 ),
@@ -1920,7 +1683,7 @@ jobs:
                       const SizedBox(height: 16),
                       Container(
                         padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+                        color: Colors.white,
                         child: QrImageView(data: myId, version: QrVersions.auto, size: 180.0),
                       ),
                     ],
