@@ -24,30 +24,28 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate LVNO SmartClient V6.9.1 (Custom Icon + Dark Orange UI + Block-Only DNS)
+      - name: Generate LVNO SmartClient V6.9.2 (Fixed Gradle + Custom Icon + Dark Orange UI + Block-Only DNS)
         shell: python
         run: |
-          import os, shutil, json, subprocess, re, textwrap
+          import os, sys, shutil, json, subprocess, re, textwrap
 
           gs_data = {}
+          icon_found = False
+
           for root, dirs, files in os.walk("."):
               if ".git" in root: continue
               for f in files:
+                  full_p = os.path.join(root, f)
                   if f.startswith("google-services.json"):
-                      full_p = os.path.join(root, f)
                       shutil.copy2(full_p, "/tmp/google-services.json")
                       try:
                           with open(full_p, "r", encoding="utf-8") as gf:
                               gs_data = json.load(gf)
                       except Exception:
                           pass
-
-          icon_found = False
-          for candidate in ["app_icon.png", "app_icon", "app_icon.jpg", "app_icon.jpeg"]:
-              if os.path.exists(candidate):
-                  shutil.copy2(candidate, "/tmp/app_icon_src")
-                  icon_found = True
-                  break
+                  if f in ["app_icon.png", "app_icon", "app_icon.jpg", "app_icon.jpeg"] and not icon_found:
+                      shutil.copy2(full_p, "/tmp/app_icon_src")
+                      icon_found = True
 
           proj_info = gs_data.get("project_info", {})
           project_id = proj_info.get("project_id", "netspay-1f0fc")
@@ -66,7 +64,7 @@ jobs:
           subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
 
           if icon_found and os.path.exists("/tmp/app_icon_src"):
-              subprocess.run(["pip", "install", "--quiet", "Pillow"], check=True)
+              subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", "--quiet", "Pillow"], check=True)
               from PIL import Image, ImageDraw
               img = Image.open("/tmp/app_icon_src").convert("RGBA")
               w, h = img.size
@@ -103,11 +101,11 @@ jobs:
               with open(path, "w", encoding="utf-8") as f:
                   f.write(cleaned)
 
-          write_clean("pubspec.yaml", '''
+          write_clean("pubspec.yaml", r'''
           name: smartclient
           description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
           publish_to: 'none'
-          version: 6.9.1+32
+          version: 6.9.2+33
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -129,7 +127,7 @@ jobs:
           kt_dir = "android/app/src/main/kotlin/com/lvno/smartclient"
           os.makedirs(kt_dir, exist_ok=True)
 
-          write_clean(os.path.join(kt_dir, "VpnTunnelService.kt"), '''
+          write_clean(os.path.join(kt_dir, "VpnTunnelService.kt"), r'''
           package com.lvno.smartclient
 
           import android.content.Intent
@@ -411,7 +409,7 @@ jobs:
           }
           ''')
 
-          write_clean(os.path.join(kt_dir, "MainActivity.kt"), '''
+          write_clean(os.path.join(kt_dir, "MainActivity.kt"), r'''
           package com.lvno.smartclient
 
           import android.app.Activity
@@ -610,7 +608,7 @@ jobs:
           }
           ''')
 
-          write_clean("android/app/src/main/AndroidManifest.xml", '''
+          write_clean("android/app/src/main/AndroidManifest.xml", r'''
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
@@ -652,7 +650,7 @@ jobs:
           </manifest>
           ''')
 
-          main_code = '''
+          main_code = r'''
           import 'dart:async';
           import 'dart:convert';
           import 'package:flutter/material.dart';
@@ -2209,12 +2207,78 @@ jobs:
           main_clean = main_code.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           write_clean("lib/main.dart", main_clean)
 
-          for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              if os.path.exists(app_g):
-                  txt = open(app_g).read()
-                  txt = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", txt)
-                  txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
-                  open(app_g, "w").write(txt)
+          for s_file in ["android/settings.gradle", "android/settings.gradle.kts"]:
+              if os.path.exists(s_file):
+                  with open(s_file, "r", encoding="utf-8") as sf:
+                      stxt = sf.read()
+                  stxt = re.sub(r'id\s+"com\.android\.application"\s+version\s+"[^"]+"', 'id "com.android.application" version "8.4.0"', stxt)
+                  stxt = re.sub(r'id\("com\.android\.application"\)\s+version\s+"[^"]+"', 'id("com.android.application") version "8.4.0"', stxt)
+                  stxt = re.sub(r'id\s+"org\.jetbrains\.kotlin\.android"\s+version\s+"[^"]+"', 'id "org.jetbrains.kotlin.android" version "1.9.24"', stxt)
+                  stxt = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"[^"]+"', 'id("org.jetbrains.kotlin.android") version "1.9.24"', stxt)
+                  with open(s_file, "w", encoding="utf-8") as sf:
+                      sf.write(stxt)
+
+          gw_prop = "android/gradle/wrapper/gradle-wrapper.properties"
+          if os.path.exists(gw_prop):
+              with open(gw_prop, "r", encoding="utf-8") as gwf:
+                  gwtxt = gwf.read()
+              gwtxt = re.sub(r"gradle-[0-9.]+-all\.zip", "gradle-8.7-all.zip", gwtxt)
+              gwtxt = re.sub(r"gradle-[0-9.]+-bin\.zip", "gradle-8.7-all.zip", gwtxt)
+              with open(gw_prop, "w", encoding="utf-8") as gwf:
+                  gwf.write(gwtxt)
+
+          if os.path.exists("android/app/build.gradle.kts"):
+              os.remove("android/app/build.gradle.kts")
+
+          app_build_gradle = r'''
+          plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          android {
+              namespace = "com.lvno.smartclient"
+              compileSdk = 35
+              ndkVersion = flutter.ndkVersion
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+                  coreLibraryDesugaringEnabled = true
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              defaultConfig {
+                  applicationId = "com.lvno.smartclient"
+                  minSdk = 23
+                  targetSdk = 34
+                  versionCode = 33
+                  versionName = "6.9.2"
+                  multiDexEnabled = true
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.debug
+                      minifyEnabled = false
+                      shrinkResources = false
+                  }
+              }
+          }
+
+          flutter {
+              source = "../.."
+          }
+
+          dependencies {
+              coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"
+          }
+          '''
+          write_clean("android/app/build.gradle", app_build_gradle)
 
       - name: Install Flutter Dependencies
         run: flutter pub get
@@ -2227,3 +2291,5 @@ jobs:
         with:
           name: LVNO-SmartClient-Release-APK
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
