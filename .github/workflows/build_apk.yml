@@ -28,7 +28,7 @@ jobs:
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate LVNO SmartClient V6.9.4 (Kotlin Fix + Custom Icon + Dark Orange UI + Block-Only DNS)
+      - name: Generate LVNO SmartClient V6.9.5 (Memory-Safe + Custom Icon + Dark Orange UI + Block-Only DNS)
         shell: python
         run: |
           import os, sys, shutil, json, subprocess, re, textwrap
@@ -85,6 +85,9 @@ jobs:
               ]:
                   target_dir = os.path.join(res_dir, folder)
                   os.makedirs(target_dir, exist_ok=True)
+                  for old_f in os.listdir(target_dir):
+                      if old_f.startswith("ic_launcher"):
+                          os.remove(os.path.join(target_dir, old_f))
                   resized = img.resize((size, size), Image.Resampling.LANCZOS)
                   resized.save(os.path.join(target_dir, "ic_launcher.png"), "PNG")
                   resized.save(os.path.join(target_dir, "ic_launcher_round.png"), "PNG")
@@ -110,7 +113,7 @@ jobs:
           name: smartclient
           description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
           publish_to: 'none'
-          version: 6.9.4+35
+          version: 6.9.5+36
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -148,6 +151,7 @@ jobs:
           import java.net.DatagramPacket
           import java.net.DatagramSocket
           import java.net.InetAddress
+          import java.util.Collections
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
           import java.util.concurrent.atomic.AtomicLong
@@ -161,7 +165,7 @@ jobs:
                   val cacheBytesCount = AtomicLong(0L)
                   val blockedDnsCount = AtomicLong(0L)
                   var lastTotalBytes: Long = 0L
-                  val blockedDomains = ConcurrentHashMap.newKeySet<String>()
+                  val blockedDomains: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
               }
 
               private var vpnInterface: ParcelFileDescriptor? = null
@@ -2236,13 +2240,14 @@ jobs:
               with open(gw_prop, "w", encoding="utf-8") as gwf:
                   gwf.write(gwtxt)
 
-          g_prop = "android/gradle.properties"
-          if os.path.exists(g_prop):
-              with open(g_prop, "r", encoding="utf-8") as gpf:
-                  gptxt = gpf.read()
-              gptxt = re.sub(r"org\.gradle\.jvmargs=.*", "org.gradle.jvmargs=-Xmx3G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8", gptxt)
-              with open(g_prop, "w", encoding="utf-8") as gpf:
-                  gpf.write(gptxt)
+          write_clean("android/gradle.properties", r'''
+          org.gradle.jvmargs=-Xmx2G -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8
+          org.gradle.parallel=false
+          org.gradle.workers.max=2
+          kotlin.daemon.jvm.options=-Xmx1G
+          android.useAndroidX=true
+          android.enableJetifier=true
+          ''')
 
           if os.path.exists("android/app/build.gradle.kts"):
               os.remove("android/app/build.gradle.kts")
@@ -2256,25 +2261,29 @@ jobs:
 
           android {
               namespace = "com.lvno.smartclient"
-              compileSdk = 35
+              compileSdk = 34
               ndkVersion = flutter.ndkVersion
 
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
-                  coreLibraryDesugaringEnabled = true
               }
 
               kotlinOptions {
                   jvmTarget = "17"
               }
 
+              lint {
+                  checkReleaseBuilds = false
+                  abortOnError = false
+              }
+
               defaultConfig {
                   applicationId = "com.lvno.smartclient"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 35
-                  versionName = "6.9.4"
+                  versionCode = 36
+                  versionName = "6.9.5"
                   multiDexEnabled = true
               }
 
@@ -2289,10 +2298,6 @@ jobs:
 
           flutter {
               source = "../.."
-          }
-
-          dependencies {
-              coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"
           }
           '''
           write_clean("android/app/build.gradle", app_build_gradle)
