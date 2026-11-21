@@ -28,7 +28,7 @@ jobs:
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate LVNO SmartClient V6.9.5 (Memory-Safe + Custom Icon + Dark Orange UI + Block-Only DNS)
+      - name: Generate LVNO SmartClient V6.9.6 (Typed Kotlin + Custom Icon + Dark Orange UI + Block-Only DNS)
         shell: python
         run: |
           import os, sys, shutil, json, subprocess, re, textwrap
@@ -113,7 +113,7 @@ jobs:
           name: smartclient
           description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
           publish_to: 'none'
-          version: 6.9.5+36
+          version: 6.9.6+37
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -547,7 +547,7 @@ jobs:
                                       VpnTunnelService.lastTotalBytes = nowTotal
                                   }
                               }
-                              val stats = mapOf(
+                              val stats = mapOf<String, Any>(
                                   "wanBytes" to wBytes,
                                   "cacheBytes" to cBytes,
                                   "blockedDns" to VpnTunnelService.blockedDnsCount.get(),
@@ -2282,8 +2282,8 @@ jobs:
                   applicationId = "com.lvno.smartclient"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 36
-                  versionName = "6.9.5"
+                  versionCode = 37
+                  versionName = "6.9.6"
                   multiDexEnabled = true
               }
 
