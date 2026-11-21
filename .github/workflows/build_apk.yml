@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate LVNO SmartClient V6.8 (Dark Orange UI + Local RAM DNS Cache + MikroTik Gate)
+      - name: Generate LVNO SmartClient V6.9.1 (Custom Icon + Dark Orange UI + Block-Only DNS)
         shell: python
         run: |
           import os, shutil, json, subprocess, re, textwrap
@@ -42,6 +42,13 @@ jobs:
                       except Exception:
                           pass
 
+          icon_found = False
+          for candidate in ["app_icon.png", "app_icon", "app_icon.jpg", "app_icon.jpeg"]:
+              if os.path.exists(candidate):
+                  shutil.copy2(candidate, "/tmp/app_icon_src")
+                  icon_found = True
+                  break
+
           proj_info = gs_data.get("project_info", {})
           project_id = proj_info.get("project_id", "netspay-1f0fc")
           sender_id = proj_info.get("project_number", "000000000000")
@@ -58,6 +65,32 @@ jobs:
 
           subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
 
+          if icon_found and os.path.exists("/tmp/app_icon_src"):
+              subprocess.run(["pip", "install", "--quiet", "Pillow"], check=True)
+              from PIL import Image, ImageDraw
+              img = Image.open("/tmp/app_icon_src").convert("RGBA")
+              w, h = img.size
+              for corner in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+                  ImageDraw.floodfill(img, corner, (0, 0, 0, 0), thresh=45)
+
+              res_dir = "android/app/src/main/res"
+              for folder, size in [
+                  ("mipmap-mdpi", 48),
+                  ("mipmap-hdpi", 72),
+                  ("mipmap-xhdpi", 96),
+                  ("mipmap-xxhdpi", 144),
+                  ("mipmap-xxxhdpi", 192),
+              ]:
+                  target_dir = os.path.join(res_dir, folder)
+                  os.makedirs(target_dir, exist_ok=True)
+                  resized = img.resize((size, size), Image.Resampling.LANCZOS)
+                  resized.save(os.path.join(target_dir, "ic_launcher.png"), "PNG")
+              for anydpi in ["mipmap-anydpi-v26", "mipmap-anydpi"]:
+                  any_dir = os.path.join(res_dir, anydpi)
+                  if os.path.exists(any_dir):
+                      shutil.rmtree(any_dir)
+              print("CUSTOM_APP_ICON_INSTALLED_OK")
+
           if os.path.exists("test"):
               shutil.rmtree("test")
 
@@ -72,9 +105,9 @@ jobs:
 
           write_clean("pubspec.yaml", '''
           name: smartclient
-          description: LVNO Unified Network App - Dark Orange + Local DNS RAM Cache
+          description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
           publish_to: 'none'
-          version: 6.8.0+30
+          version: 6.9.1+32
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -103,34 +136,25 @@ jobs:
           import android.net.TrafficStats
           import android.net.VpnService
           import android.os.ParcelFileDescriptor
-          import java.io.ByteArrayOutputStream
           import java.io.FileInputStream
           import java.io.FileOutputStream
           import java.net.DatagramPacket
           import java.net.DatagramSocket
           import java.net.InetAddress
-          import java.nio.ByteBuffer
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
           import java.util.concurrent.atomic.AtomicLong
 
           class VpnTunnelService : VpnService() {
-              data class DnsCacheEntry(
-                  val responsePayload: ByteArray,
-                  val expiresAtMs: Long
-              )
-
               companion object {
                   val isRunning = AtomicBoolean(false)
                   val ecoModeEnabled = AtomicBoolean(false)
                   val parentalLocked = AtomicBoolean(false)
                   val wanBytesCount = AtomicLong(0L)
                   val cacheBytesCount = AtomicLong(0L)
-                  val dnsCacheHits = AtomicLong(0L)
+                  val blockedDnsCount = AtomicLong(0L)
                   var lastTotalBytes: Long = 0L
                   val blockedDomains = ConcurrentHashMap.newKeySet<String>()
-                  val localDnsRamCache = ConcurrentHashMap<String, DnsCacheEntry>()
-                  const val MAX_DNS_CACHE_ENTRIES = 1024
               }
 
               private var vpnInterface: ParcelFileDescriptor? = null
@@ -177,9 +201,15 @@ jobs:
                           .setSession("النفق الموحد")
                           .setMtu(mtuSize)
                           .addAddress("10.88.0.2", 24)
-                          .addDnsServer("10.88.0.1")
+                          .addDnsServer("1.1.1.3")
+                          .addDnsServer("1.0.0.3")
                           .addRoute("10.88.0.0", 24)
                           .addRoute("10.99.99.0", 24)
+
+                      if (blockedDomains.isNotEmpty()) {
+                          builder.addRoute("1.1.1.3", 32)
+                          builder.addRoute("1.0.0.3", 32)
+                      }
 
                       try {
                           builder.addDisallowedApplication(packageName)
@@ -188,14 +218,14 @@ jobs:
                       vpnInterface = builder.establish()
                       if (vpnInterface != null) {
                           isRunning.set(true)
-                          startPacketAndDnsCacheEngine()
+                          startPacketEngine()
                       }
                   } catch (_: Exception) {
                       isRunning.set(false)
                   }
               }
 
-              private fun startPacketAndDnsCacheEngine() {
+              private fun startPacketEngine() {
                   workerThread = Thread {
                       val fd = vpnInterface?.fileDescriptor ?: return@Thread
                       val inputStream = FileInputStream(fd)
@@ -214,11 +244,10 @@ jobs:
                                   val ihl = (packet[0].toInt() and 0x0F) * 4
                                   val protocol = packet[9].toInt() and 0xFF
 
-                                  // اعتراض استعلامات DNS (UDP Port 53) لمعالجتها عبر الكاش المحلي في الذاكرة
                                   if (version == 4 && protocol == 17 && length > ihl + 20) {
                                       val dstPort = ((packet[ihl + 2].toInt() and 0xFF) shl 8) or (packet[ihl + 3].toInt() and 0xFF)
                                       if (dstPort == 53) {
-                                          handleLocalDnsQuery(packet, length, ihl, outputStream)
+                                          handleBlockOnlyDns(packet, length, ihl, outputStream)
                                           continue
                                       }
                                   }
@@ -245,63 +274,37 @@ jobs:
                   workerThread?.start()
               }
 
-              private fun handleLocalDnsQuery(ipPacket: ByteArray, totalLen: Int, ihl: Int, outStream: FileOutputStream) {
-                  val udpOffset = ihl
-                  val dnsOffset = udpOffset + 8
+              private fun handleBlockOnlyDns(ipPacket: ByteArray, totalLen: Int, ihl: Int, outStream: FileOutputStream) {
+                  val dnsOffset = ihl + 8
                   val dnsLen = totalLen - dnsOffset
                   if (dnsLen < 12) return
 
                   val dnsQuery = ipPacket.copyOfRange(dnsOffset, totalLen)
                   val domain = extractDomainName(dnsQuery)
-                  val qType = extractQueryType(dnsQuery)
-                  val cacheKey = "${domain.lowercase()}:$qType"
 
-                  // 1. فحص الحظر الأبوي الفوري
                   if (domain.isNotEmpty() && isDomainBlocked(domain)) {
                       val nxResp = buildNxDomainResponse(dnsQuery)
                       val replyIp = buildIpv4UdpReply(ipPacket, ihl, nxResp)
                       synchronized(outStream) { outStream.write(replyIp) }
+                      blockedDnsCount.incrementAndGet()
                       return
                   }
 
-                  // 2. البحث في كاش الذاكرة المحلي (RAM Cache)
-                  val now = System.currentTimeMillis()
-                  val cached = localDnsRamCache[cacheKey]
-                  if (cached != null && cached.expiresAtMs > now && cached.responsePayload.size >= 12) {
-                      val clonedResp = cached.responsePayload.copyOf()
-                      // مطابقة رقم معاملة الاستعلام (Transaction ID)
-                      clonedResp[0] = dnsQuery[0]
-                      clonedResp[1] = dnsQuery[1]
-                      val replyIp = buildIpv4UdpReply(ipPacket, ihl, clonedResp)
-                      synchronized(outStream) { outStream.write(replyIp) }
-                      dnsCacheHits.incrementAndGet()
-                      return
-                  }
-
-                  // 3. استعلام خارجي سريع عند عدم وجوده في الكاش ثم تخزينه في الذاكرة
+                  val dstIpBytes = ipPacket.copyOfRange(16, 20)
                   Thread {
                       var upstreamSocket: DatagramSocket? = null
                       try {
                           upstreamSocket = DatagramSocket()
                           protect(upstreamSocket)
-                          upstreamSocket.soTimeout = 1800
-                          val upPkt = DatagramPacket(dnsQuery, dnsQuery.size, InetAddress.getByName("1.1.1.3"), 53)
+                          upstreamSocket.soTimeout = 2500
+                          val targetAddr = InetAddress.getByAddress(dstIpBytes)
+                          val upPkt = DatagramPacket(dnsQuery, dnsQuery.size, targetAddr, 53)
                           upstreamSocket.send(upPkt)
 
-                          val respBuf = ByteArray(1024)
+                          val respBuf = ByteArray(1500)
                           val respPkt = DatagramPacket(respBuf, respBuf.size)
                           upstreamSocket.receive(respPkt)
                           val validResp = respBuf.copyOf(respPkt.length)
-
-                          if (domain.isNotEmpty() && validResp.size >= 12) {
-                              if (localDnsRamCache.size >= MAX_DNS_CACHE_ENTRIES) {
-                                  localDnsRamCache.clear()
-                              }
-                              localDnsRamCache[cacheKey] = DnsCacheEntry(
-                                  responsePayload = validResp.copyOf(),
-                                  expiresAtMs = System.currentTimeMillis() + 300_000L // حفظ لمدة 5 دقائق في RAM
-                              )
-                          }
 
                           val replyIp = buildIpv4UdpReply(ipPacket, ihl, validResp)
                           synchronized(outStream) { outStream.write(replyIp) }
@@ -338,32 +341,11 @@ jobs:
                   } catch (_: Exception) { "" }
               }
 
-              private fun extractQueryType(dns: ByteArray): Int {
-                  return try {
-                      var pos = 12
-                      while (pos < dns.size) {
-                          val len = dns[pos].toInt() and 0xFF
-                          if (len == 0) {
-                              pos += 1
-                              break
-                          }
-                          if (len >= 0xC0) {
-                              pos += 2
-                              break
-                          }
-                          pos += len + 1
-                      }
-                      if (pos + 2 <= dns.size) {
-                          ((dns[pos].toInt() and 0xFF) shl 8) or (dns[pos + 1].toInt() and 0xFF)
-                      } else 1
-                  } catch (_: Exception) { 1 }
-              }
-
               private fun buildNxDomainResponse(query: ByteArray): ByteArray {
                   val resp = query.copyOf()
                   if (resp.size >= 4) {
                       resp[2] = ((resp[2].toInt() and 0xFF) or 0x81).toByte()
-                      resp[3] = 0x83.toByte() // NXDOMAIN
+                      resp[3] = 0x83.toByte()
                   }
                   return resp
               }
@@ -373,7 +355,6 @@ jobs:
                   val totalIpLen = 20 + udpLen
                   val out = ByteArray(totalIpLen)
 
-                  // IPv4 Header (20 bytes)
                   out[0] = 0x45.toByte()
                   out[1] = 0x00.toByte()
                   out[2] = ((totalIpLen ushr 8) and 0xFF).toByte()
@@ -382,14 +363,12 @@ jobs:
                   out[5] = 0x00.toByte()
                   out[6] = 0x40.toByte()
                   out[7] = 0x00.toByte()
-                  out[8] = 64.toByte() // TTL
-                  out[9] = 17.toByte() // UDP
+                  out[8] = 64.toByte()
+                  out[9] = 17.toByte()
 
-                  // عكس عنوان المصدر والوجهة
                   System.arraycopy(origIp, 16, out, 12, 4)
                   System.arraycopy(origIp, 12, out, 16, 4)
 
-                  // حساب IP Checksum
                   var sum = 0
                   for (i in 0 until 20 step 2) {
                       if (i == 10) continue
@@ -403,7 +382,6 @@ jobs:
                   out[10] = ((ipCsum ushr 8) and 0xFF).toByte()
                   out[11] = (ipCsum and 0xFF).toByte()
 
-                  // UDP Header (8 bytes) - عكس المنافذ
                   out[20] = origIp[ihl + 2]
                   out[21] = origIp[ihl + 3]
                   out[22] = origIp[ihl]
@@ -462,7 +440,7 @@ jobs:
                   var socket: DatagramSocket? = null
                   try {
                       socket = DatagramSocket()
-                      socket.soTimeout = 1000
+                      socket.soTimeout = 1500
                       val out = ByteArrayOutputStream()
                       out.write(byteArrayOf(0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
                       for (part in domainToQuery.split(".")) {
@@ -561,8 +539,8 @@ jobs:
                               val stats = mapOf(
                                   "wanBytes" to wBytes,
                                   "cacheBytes" to cBytes,
-                                  "dnsHits" to VpnTunnelService.dnsCacheHits.get(),
-                                  "dnsEntries" to VpnTunnelService.localDnsRamCache.size
+                                  "blockedDns" to VpnTunnelService.blockedDnsCount.get(),
+                                  "blockedRules" to VpnTunnelService.blockedDomains.size
                               )
                               result.success(stats)
                           }
@@ -731,10 +709,11 @@ jobs:
             int serverRefillTriggerMb = 80;
             int serverCreditBalanceYer = 0;
             double liveSpeedKbps = 0.0;
-            int dnsCacheHits = 0;
-            int dnsCacheEntries = 0;
+            int blockedDnsCount = 0;
+            int blockedRulesCount = 0;
             int _saveTickCounter = 0;
             int _routerVerifyTickCounter = 0;
+            int _consecutiveVerifyFails = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -1075,8 +1054,8 @@ jobs:
                 final Map? res = raw as Map?;
                 final int wBytes = ((res?['wanBytes'] ?? 0) as num).toInt();
                 final int cBytes = ((res?['cacheBytes'] ?? 0) as num).toInt();
-                dnsCacheHits = ((res?['dnsHits'] ?? 0) as num).toInt();
-                dnsCacheEntries = ((res?['dnsEntries'] ?? 0) as num).toInt();
+                blockedDnsCount = ((res?['blockedDns'] ?? 0) as num).toInt();
+                blockedRulesCount = ((res?['blockedRules'] ?? 0) as num).toInt();
                 final int delta = wBytes + cBytes;
 
                 if (delta > 0 && !isPurchasingChunk) {
@@ -1096,14 +1075,20 @@ jobs:
                 }
 
                 _routerVerifyTickCounter++;
-                if (_routerVerifyTickCounter >= 50) {
+                if (_routerVerifyTickCounter >= 225) {
                   _routerVerifyTickCounter = 0;
                   final stillOnRouter = await discoverAndVerifyPhysicalNetwork();
-                  if (!stillOnRouter) {
-                    await stopSmartConnection();
-                    return;
+                  if (stillOnRouter) {
+                    _consecutiveVerifyFails = 0;
+                    await knockMikroTikGateway(unlock: true);
+                  } else {
+                    _consecutiveVerifyFails++;
+                    if (_consecutiveVerifyFails >= 2) {
+                      _consecutiveVerifyFails = 0;
+                      await stopSmartConnection();
+                      return;
+                    }
                   }
-                  await knockMikroTikGateway(unlock: true);
                 }
 
                 final int remBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
@@ -1194,6 +1179,7 @@ jobs:
                 throw Exception("⛔ لا يمكن تشغيل النفق! أنت غير متصل بشبكة ميكروتك مفعلة في النظام");
               }
 
+              _consecutiveVerifyFails = 0;
               await syncDevicePolicyFromWalletDoc(wData);
 
               if ((activeChunkTotalBytes - activeChunkConsumedBytes) <= 512 * 1024) {
@@ -1209,6 +1195,7 @@ jobs:
             Future<void> stopSmartConnection() async {
               liveSpeedKbps = 0.0;
               currentHostName = "غير متصل بشبكة مفعلة";
+              _consecutiveVerifyFails = 0;
               await persistQuotaState();
               await knockMikroTikGateway(unlock: false);
               try {
@@ -1927,7 +1914,9 @@ jobs:
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
-                              "⚡ كاش DNS المحلي: ${widget.engine.dnsCacheEntries} نطاق مخزن | ${widget.engine.dnsCacheHits} استجابة فورية",
+                              widget.engine.blockedRulesCount > 0
+                                  ? "🛡️ فلتر DNS المحلي: ${widget.engine.blockedRulesCount} قاعدة حظر | صدّ ${widget.engine.blockedDnsCount} طلب"
+                                  : "🛡️ فلتر DNS المحلي: شفاف وسريع (لا توجد قيود حظر)",
                               style: const TextStyle(fontSize: 11, color: kSuccessGreen, fontWeight: FontWeight.bold),
                             ),
                           ),
@@ -1944,7 +1933,7 @@ jobs:
                                 try {
                                   if (!widget.engine.isVpnActive) {
                                     await widget.engine.startSmartConnection(w);
-                                    setState(() => _feedback = "✅ تم التحقق من بصمة الميكروتك وتفعيل كاش DNS وفتح النفق على (${widget.engine.currentHostName})");
+                                    setState(() => _feedback = "✅ تم التحقق من بصمة الميكروتك وفتح النفق على (${widget.engine.currentHostName})");
                                   } else {
                                     await widget.engine.stopSmartConnection();
                                     setState(() => _feedback = "🔒 تم إيقاف الإنترنت وحفظ قراءة العداد");
@@ -2041,6 +2030,7 @@ jobs:
                   final c = snap.data!.data() as Map<String, dynamic>;
                   final bool locked = (c['parental_locked'] ?? false) == true;
                   final bool childEco = (c['eco_mode'] ?? false) == true;
+                  final List blockedCats = (c['blocked_categories'] as List?) ?? [];
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 12),
@@ -2051,6 +2041,7 @@ jobs:
                       border: Border.all(color: const Color(0xFF334155)),
                     ),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         SwitchListTile(
                           activeColor: kMandarinOrange,
@@ -2065,9 +2056,39 @@ jobs:
                           value: childEco,
                           onChanged: (v) => db.collection('wallets').doc(childId).update({'eco_mode': v}),
                         ),
+                        const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                          child: Text("حظر الفئات عبر DNS المحلي:", style: TextStyle(fontSize: 12, color: Colors.white70)),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Wrap(
+                            spacing: 8,
+                            children: [
+                              _catChip(childId, blockedCats, 'games', 'الألعاب'),
+                              _catChip(childId, blockedCats, 'social', 'التواصل'),
+                              _catChip(childId, blockedCats, 'video', 'الفيديو'),
+                            ],
+                          ),
+                        ),
                       ],
                     ),
                   );
+                },
+              );
+            }
+
+            Widget _catChip(String childId, List cats, String key, String label) {
+              final bool selected = cats.contains(key);
+              return FilterChip(
+                label: Text(label),
+                selected: selected,
+                selectedColor: kMandarinOrange,
+                labelStyle: TextStyle(color: selected ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+                onSelected: (val) {
+                  final next = List<String>.from(cats.map((e) => e.toString()));
+                  val ? next.add(key) : next.remove(key);
+                  FirebaseFirestore.instance.collection('wallets').doc(childId).update({'blocked_categories': next});
                 },
               );
             }
