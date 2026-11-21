@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Compact LVNO V6 Project (Strict Physical Network Lock)
+      - name: Generate LVNO SmartClient V6.8 (Dark Orange UI + Local RAM DNS Cache + MikroTik Gate)
         shell: python
         run: |
           import os, shutil, json, subprocess, re, textwrap
@@ -37,7 +37,8 @@ jobs:
                       full_p = os.path.join(root, f)
                       shutil.copy2(full_p, "/tmp/google-services.json")
                       try:
-                          gs_data = json.load(open(full_p))
+                          with open(full_p, "r", encoding="utf-8") as gf:
+                              gs_data = json.load(gf)
                       except Exception:
                           pass
 
@@ -66,13 +67,14 @@ jobs:
           def write_clean(path, text):
               norm = text.replace("\u00a0", " ")
               cleaned = textwrap.dedent(norm).strip() + "\n"
-              open(path, "w", encoding="utf-8").write(cleaned)
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(cleaned)
 
           write_clean("pubspec.yaml", '''
           name: smartclient
-          description: Unified Commercial Network App
+          description: LVNO Unified Network App - Dark Orange + Local DNS RAM Cache
           publish_to: 'none'
-          version: 6.5.0+21
+          version: 6.8.0+30
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -101,21 +103,34 @@ jobs:
           import android.net.TrafficStats
           import android.net.VpnService
           import android.os.ParcelFileDescriptor
+          import java.io.ByteArrayOutputStream
           import java.io.FileInputStream
+          import java.io.FileOutputStream
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
           import java.nio.ByteBuffer
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
           import java.util.concurrent.atomic.AtomicLong
 
           class VpnTunnelService : VpnService() {
+              data class DnsCacheEntry(
+                  val responsePayload: ByteArray,
+                  val expiresAtMs: Long
+              )
+
               companion object {
                   val isRunning = AtomicBoolean(false)
                   val ecoModeEnabled = AtomicBoolean(false)
                   val parentalLocked = AtomicBoolean(false)
                   val wanBytesCount = AtomicLong(0L)
                   val cacheBytesCount = AtomicLong(0L)
+                  val dnsCacheHits = AtomicLong(0L)
                   var lastTotalBytes: Long = 0L
                   val blockedDomains = ConcurrentHashMap.newKeySet<String>()
+                  val localDnsRamCache = ConcurrentHashMap<String, DnsCacheEntry>()
+                  const val MAX_DNS_CACHE_ENTRIES = 1024
               }
 
               private var vpnInterface: ParcelFileDescriptor? = null
@@ -135,7 +150,7 @@ jobs:
                       parentalLocked.set(locked)
                       blockedDomains.clear()
                       for (part in csv.split(",")) {
-                          val d = part.trim()
+                          val d = part.trim().lowercase()
                           if (d.isNotEmpty()) blockedDomains.add(d)
                       }
                       if (locked) stopVpnTunnel()
@@ -162,30 +177,30 @@ jobs:
                           .setSession("النفق الموحد")
                           .setMtu(mtuSize)
                           .addAddress("10.88.0.2", 24)
-                          .addDnsServer("1.1.1.3")
-                          .addDnsServer("1.0.0.3")
-                          .addRoute("10.99.99.0", 24)
+                          .addDnsServer("10.88.0.1")
                           .addRoute("10.88.0.0", 24)
+                          .addRoute("10.99.99.0", 24)
 
                       try {
                           builder.addDisallowedApplication(packageName)
-                      } catch (e: Exception) {}
+                      } catch (_: Exception) {}
 
                       vpnInterface = builder.establish()
                       if (vpnInterface != null) {
                           isRunning.set(true)
-                          startPacketEngine()
+                          startPacketAndDnsCacheEngine()
                       }
-                  } catch (e: Exception) {
+                  } catch (_: Exception) {
                       isRunning.set(false)
                   }
               }
 
-              private fun startPacketEngine() {
+              private fun startPacketAndDnsCacheEngine() {
                   workerThread = Thread {
                       val fd = vpnInterface?.fileDescriptor ?: return@Thread
                       val inputStream = FileInputStream(fd)
-                      val packet = ByteBuffer.allocate(32767)
+                      val outputStream = FileOutputStream(fd)
+                      val packet = ByteArray(32767)
 
                       while (isRunning.get() && !Thread.currentThread().isInterrupted) {
                           try {
@@ -193,12 +208,24 @@ jobs:
                                   stopVpnTunnel()
                                   break
                               }
-                              val length = inputStream.read(packet.array())
-                              if (length > 20) {
-                                  val b0 = packet.get(16).toInt() and 0xFF
-                                  val b1 = packet.get(17).toInt() and 0xFF
-                                  val b2 = packet.get(18).toInt() and 0xFF
+                              val length = inputStream.read(packet)
+                              if (length > 28) {
+                                  val version = (packet[0].toInt() ushr 4) and 0x0F
+                                  val ihl = (packet[0].toInt() and 0x0F) * 4
+                                  val protocol = packet[9].toInt() and 0xFF
 
+                                  // اعتراض استعلامات DNS (UDP Port 53) لمعالجتها عبر الكاش المحلي في الذاكرة
+                                  if (version == 4 && protocol == 17 && length > ihl + 20) {
+                                      val dstPort = ((packet[ihl + 2].toInt() and 0xFF) shl 8) or (packet[ihl + 3].toInt() and 0xFF)
+                                      if (dstPort == 53) {
+                                          handleLocalDnsQuery(packet, length, ihl, outputStream)
+                                          continue
+                                      }
+                                  }
+
+                                  val b0 = packet[16].toInt() and 0xFF
+                                  val b1 = packet[17].toInt() and 0xFF
+                                  val b2 = packet[18].toInt() and 0xFF
                                   if (b0 == 10 && b1 == 99 && b2 == 99) {
                                       cacheBytesCount.addAndGet(length.toLong())
                                   } else {
@@ -207,11 +234,10 @@ jobs:
                                   if (ecoModeEnabled.get() && length > 1100) {
                                       Thread.sleep(6)
                                   }
-                                  packet.clear()
                               } else {
-                                  Thread.sleep(12)
+                                  Thread.sleep(10)
                               }
-                          } catch (e: Exception) {
+                          } catch (_: Exception) {
                               break
                           }
                       }
@@ -219,11 +245,183 @@ jobs:
                   workerThread?.start()
               }
 
+              private fun handleLocalDnsQuery(ipPacket: ByteArray, totalLen: Int, ihl: Int, outStream: FileOutputStream) {
+                  val udpOffset = ihl
+                  val dnsOffset = udpOffset + 8
+                  val dnsLen = totalLen - dnsOffset
+                  if (dnsLen < 12) return
+
+                  val dnsQuery = ipPacket.copyOfRange(dnsOffset, totalLen)
+                  val domain = extractDomainName(dnsQuery)
+                  val qType = extractQueryType(dnsQuery)
+                  val cacheKey = "${domain.lowercase()}:$qType"
+
+                  // 1. فحص الحظر الأبوي الفوري
+                  if (domain.isNotEmpty() && isDomainBlocked(domain)) {
+                      val nxResp = buildNxDomainResponse(dnsQuery)
+                      val replyIp = buildIpv4UdpReply(ipPacket, ihl, nxResp)
+                      synchronized(outStream) { outStream.write(replyIp) }
+                      return
+                  }
+
+                  // 2. البحث في كاش الذاكرة المحلي (RAM Cache)
+                  val now = System.currentTimeMillis()
+                  val cached = localDnsRamCache[cacheKey]
+                  if (cached != null && cached.expiresAtMs > now && cached.responsePayload.size >= 12) {
+                      val clonedResp = cached.responsePayload.copyOf()
+                      // مطابقة رقم معاملة الاستعلام (Transaction ID)
+                      clonedResp[0] = dnsQuery[0]
+                      clonedResp[1] = dnsQuery[1]
+                      val replyIp = buildIpv4UdpReply(ipPacket, ihl, clonedResp)
+                      synchronized(outStream) { outStream.write(replyIp) }
+                      dnsCacheHits.incrementAndGet()
+                      return
+                  }
+
+                  // 3. استعلام خارجي سريع عند عدم وجوده في الكاش ثم تخزينه في الذاكرة
+                  Thread {
+                      var upstreamSocket: DatagramSocket? = null
+                      try {
+                          upstreamSocket = DatagramSocket()
+                          protect(upstreamSocket)
+                          upstreamSocket.soTimeout = 1800
+                          val upPkt = DatagramPacket(dnsQuery, dnsQuery.size, InetAddress.getByName("1.1.1.3"), 53)
+                          upstreamSocket.send(upPkt)
+
+                          val respBuf = ByteArray(1024)
+                          val respPkt = DatagramPacket(respBuf, respBuf.size)
+                          upstreamSocket.receive(respPkt)
+                          val validResp = respBuf.copyOf(respPkt.length)
+
+                          if (domain.isNotEmpty() && validResp.size >= 12) {
+                              if (localDnsRamCache.size >= MAX_DNS_CACHE_ENTRIES) {
+                                  localDnsRamCache.clear()
+                              }
+                              localDnsRamCache[cacheKey] = DnsCacheEntry(
+                                  responsePayload = validResp.copyOf(),
+                                  expiresAtMs = System.currentTimeMillis() + 300_000L // حفظ لمدة 5 دقائق في RAM
+                              )
+                          }
+
+                          val replyIp = buildIpv4UdpReply(ipPacket, ihl, validResp)
+                          synchronized(outStream) { outStream.write(replyIp) }
+                      } catch (_: Exception) {
+                      } finally {
+                          try { upstreamSocket?.close() } catch (_: Exception) {}
+                      }
+                  }.start()
+              }
+
+              private fun isDomainBlocked(domain: String): Boolean {
+                  val lower = domain.lowercase()
+                  for (b in blockedDomains) {
+                      if (lower == b || lower.endsWith(".$b")) return true
+                  }
+                  return false
+              }
+
+              private fun extractDomainName(dns: ByteArray): String {
+                  return try {
+                      var pos = 12
+                      val sb = StringBuilder()
+                      while (pos < dns.size) {
+                          val len = dns[pos].toInt() and 0xFF
+                          if (len == 0) break
+                          if (len >= 0xC0 || pos + 1 + len > dns.size) break
+                          if (sb.isNotEmpty()) sb.append('.')
+                          for (i in 0 until len) {
+                              sb.append((dns[pos + 1 + i].toInt() and 0xFF).toChar())
+                          }
+                          pos += len + 1
+                      }
+                      sb.toString()
+                  } catch (_: Exception) { "" }
+              }
+
+              private fun extractQueryType(dns: ByteArray): Int {
+                  return try {
+                      var pos = 12
+                      while (pos < dns.size) {
+                          val len = dns[pos].toInt() and 0xFF
+                          if (len == 0) {
+                              pos += 1
+                              break
+                          }
+                          if (len >= 0xC0) {
+                              pos += 2
+                              break
+                          }
+                          pos += len + 1
+                      }
+                      if (pos + 2 <= dns.size) {
+                          ((dns[pos].toInt() and 0xFF) shl 8) or (dns[pos + 1].toInt() and 0xFF)
+                      } else 1
+                  } catch (_: Exception) { 1 }
+              }
+
+              private fun buildNxDomainResponse(query: ByteArray): ByteArray {
+                  val resp = query.copyOf()
+                  if (resp.size >= 4) {
+                      resp[2] = ((resp[2].toInt() and 0xFF) or 0x81).toByte()
+                      resp[3] = 0x83.toByte() // NXDOMAIN
+                  }
+                  return resp
+              }
+
+              private fun buildIpv4UdpReply(origIp: ByteArray, ihl: Int, udpPayload: ByteArray): ByteArray {
+                  val udpLen = 8 + udpPayload.size
+                  val totalIpLen = 20 + udpLen
+                  val out = ByteArray(totalIpLen)
+
+                  // IPv4 Header (20 bytes)
+                  out[0] = 0x45.toByte()
+                  out[1] = 0x00.toByte()
+                  out[2] = ((totalIpLen ushr 8) and 0xFF).toByte()
+                  out[3] = (totalIpLen and 0xFF).toByte()
+                  out[4] = 0x00.toByte()
+                  out[5] = 0x00.toByte()
+                  out[6] = 0x40.toByte()
+                  out[7] = 0x00.toByte()
+                  out[8] = 64.toByte() // TTL
+                  out[9] = 17.toByte() // UDP
+
+                  // عكس عنوان المصدر والوجهة
+                  System.arraycopy(origIp, 16, out, 12, 4)
+                  System.arraycopy(origIp, 12, out, 16, 4)
+
+                  // حساب IP Checksum
+                  var sum = 0
+                  for (i in 0 until 20 step 2) {
+                      if (i == 10) continue
+                      val word = ((out[i].toInt() and 0xFF) shl 8) or (out[i + 1].toInt() and 0xFF)
+                      sum += word
+                  }
+                  while ((sum ushr 16) != 0) {
+                      sum = (sum and 0xFFFF) + (sum ushr 16)
+                  }
+                  val ipCsum = sum.inv() and 0xFFFF
+                  out[10] = ((ipCsum ushr 8) and 0xFF).toByte()
+                  out[11] = (ipCsum and 0xFF).toByte()
+
+                  // UDP Header (8 bytes) - عكس المنافذ
+                  out[20] = origIp[ihl + 2]
+                  out[21] = origIp[ihl + 3]
+                  out[22] = origIp[ihl]
+                  out[23] = origIp[ihl + 1]
+                  out[24] = ((udpLen ushr 8) and 0xFF).toByte()
+                  out[25] = (udpLen and 0xFF).toByte()
+                  out[26] = 0x00.toByte()
+                  out[27] = 0x00.toByte()
+
+                  System.arraycopy(udpPayload, 0, out, 28, udpPayload.size)
+                  return out
+              }
+
               private fun stopVpnTunnel() {
                   isRunning.set(false)
                   workerThread?.interrupt()
                   workerThread = null
-                  try { vpnInterface?.close() } catch (e: Exception) {}
+                  try { vpnInterface?.close() } catch (_: Exception) {}
                   vpnInterface = null
                   stopSelf()
               }
@@ -260,7 +458,6 @@ jobs:
               private var pendingQrResult: MethodChannel.Result? = null
               private var pendingEcoMode: Boolean = false
 
-              // فحص بصمة الميكروتك الفيزيائية عبر UDP Port 53 المباشر
               private fun verifyMikroTikSignature(routerIp: String, domainToQuery: String): Boolean {
                   var socket: DatagramSocket? = null
                   try {
@@ -292,10 +489,10 @@ jobs:
                           }
                       }
                       return false
-                  } catch (e: Exception) {
+                  } catch (_: Exception) {
                       return false
                   } finally {
-                      try { socket?.close() } catch (e: Exception) {}
+                      try { socket?.close() } catch (_: Exception) {}
                   }
               }
 
@@ -310,8 +507,7 @@ jobs:
                               result.success(androidId)
                           }
                           "getLocalContactsJson" -> {
-                              val jsonStr = prefs.getString("contacts_json", "{}") ?: "{}"
-                              result.success(jsonStr)
+                              result.success(prefs.getString("contacts_json", "{}") ?: "{}")
                           }
                           "saveLocalContactsJson" -> {
                               val jsonStr = call.argument<String>("json") ?: "{}"
@@ -338,7 +534,7 @@ jobs:
                                   intent.putExtra("SCAN_MODE", "QR_CODE_MODE")
                                   pendingQrResult = result
                                   startActivityForResult(intent, QR_REQUEST_CODE)
-                              } catch (e: Exception) {
+                              } catch (_: Exception) {
                                   result.success("")
                               }
                           }
@@ -362,7 +558,12 @@ jobs:
                                       VpnTunnelService.lastTotalBytes = nowTotal
                                   }
                               }
-                              val stats = mapOf("wanBytes" to wBytes, "cacheBytes" to cBytes)
+                              val stats = mapOf(
+                                  "wanBytes" to wBytes,
+                                  "cacheBytes" to cBytes,
+                                  "dnsHits" to VpnTunnelService.dnsCacheHits.get(),
+                                  "dnsEntries" to VpnTunnelService.localDnsRamCache.size
+                              )
                               result.success(stats)
                           }
                           "startVpn" -> {
@@ -484,6 +685,13 @@ jobs:
           import 'package:http/http.dart' as http;
           import 'package:qr_flutter/qr_flutter.dart';
 
+          const Color kDarkBg = Color(0xFF0B1120);
+          const Color kDarkSurface = Color(0xFF0F172A);
+          const Color kDarkCard = Color(0xFF1E293B);
+          const Color kMandarinOrange = Color(0xFFFF8C00);
+          const Color kMandarinDark = Color(0xFFE67E00);
+          const Color kSuccessGreen = Color(0xFF10B981);
+
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
             runApp(const LvnoCommercialApp());
@@ -491,9 +699,18 @@ jobs:
 
           InputDecoration _dec(String label) => InputDecoration(
                 labelText: label,
+                labelStyle: const TextStyle(color: Colors.white70),
                 filled: true,
-                fillColor: const Color(0xFF0F172A),
-                border: const OutlineInputBorder(),
+                fillColor: kDarkBg,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFF334155)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: kMandarinOrange, width: 2),
+                ),
               );
 
           class SmartClientEngine {
@@ -514,6 +731,8 @@ jobs:
             int serverRefillTriggerMb = 80;
             int serverCreditBalanceYer = 0;
             double liveSpeedKbps = 0.0;
+            int dnsCacheHits = 0;
+            int dnsCacheEntries = 0;
             int _saveTickCounter = 0;
             int _routerVerifyTickCounter = 0;
 
@@ -608,11 +827,12 @@ jobs:
             Future<void> knockMikroTikGateway({required bool unlock}) async {
               final int port = unlock ? 9981 : 9982;
               try {
-                await http.get(Uri.parse('http://$currentGatewayIp:$port')).timeout(const Duration(milliseconds: 600));
+                await http
+                    .get(Uri.parse('http://$currentGatewayIp:$port/?key=$currentDynamicSecret'))
+                    .timeout(const Duration(milliseconds: 600));
               } catch (_) {}
             }
 
-            // البحث عن شبكة مفعلة في السيرفر والتحقق الفيزيائي من اتصال الجوال براوتر الميكروتك الخاص بها
             Future<bool> discoverAndVerifyPhysicalNetwork() async {
               final db = FirebaseFirestore.instance;
               final snap = await db.collection('hosts').get();
@@ -855,6 +1075,8 @@ jobs:
                 final Map? res = raw as Map?;
                 final int wBytes = ((res?['wanBytes'] ?? 0) as num).toInt();
                 final int cBytes = ((res?['cacheBytes'] ?? 0) as num).toInt();
+                dnsCacheHits = ((res?['dnsHits'] ?? 0) as num).toInt();
+                dnsCacheEntries = ((res?['dnsEntries'] ?? 0) as num).toInt();
                 final int delta = wBytes + cBytes;
 
                 if (delta > 0 && !isPurchasingChunk) {
@@ -873,7 +1095,6 @@ jobs:
                   await persistQuotaState();
                 }
 
-                // فحص دوري كل 10 ثوانٍ (50 نبضة) للتأكد من بقاء الجوال داخل شبكة الميكروتك المفعلة
                 _routerVerifyTickCounter++;
                 if (_routerVerifyTickCounter >= 50) {
                   _routerVerifyTickCounter = 0;
@@ -968,7 +1189,6 @@ jobs:
                 throw Exception("تم إيقاف الاستخدام مؤقتاً من قِبل المشرف العائلي");
               }
 
-              // شرط صارم: يجب أن يرد راوتر الميكروتك المفعل ببصمته المحلية قبل فتح النفق
               final bool onVerifiedMikroTik = await discoverAndVerifyPhysicalNetwork();
               if (!onVerifiedMikroTik) {
                 throw Exception("⛔ لا يمكن تشغيل النفق! أنت غير متصل بشبكة ميكروتك مفعلة في النظام");
@@ -1169,10 +1389,41 @@ jobs:
                 title: 'نت سباي',
                 debugShowCheckedModeBanner: false,
                 theme: ThemeData.dark().copyWith(
-                  scaffoldBackgroundColor: const Color(0xFF0B1120),
+                  scaffoldBackgroundColor: kDarkBg,
                   colorScheme: const ColorScheme.dark(
-                    primary: Color(0xFF10B981),
-                    secondary: Color(0xFF3B82F6),
+                    primary: kMandarinOrange,
+                    secondary: kMandarinDark,
+                    surface: kDarkCard,
+                  ),
+                  appBarTheme: const AppBarTheme(
+                    backgroundColor: kDarkSurface,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                  ),
+                  elevatedButtonTheme: ElevatedButtonThemeData(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: kMandarinOrange,
+                      foregroundColor: Colors.black,
+                      textStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
+                    ),
+                  ),
+                  navigationBarTheme: NavigationBarThemeData(
+                    backgroundColor: kDarkSurface,
+                    indicatorColor: kMandarinOrange.withOpacity(0.22),
+                    iconTheme: WidgetStateProperty.resolveWith((states) {
+                      if (states.contains(WidgetState.selected)) {
+                        return const IconThemeData(color: kMandarinOrange);
+                      }
+                      return const IconThemeData(color: Colors.white60);
+                    }),
+                    labelTextStyle: WidgetStateProperty.resolveWith((states) {
+                      if (states.contains(WidgetState.selected)) {
+                        return const TextStyle(color: kMandarinOrange, fontWeight: FontWeight.bold, fontSize: 12);
+                      }
+                      return const TextStyle(color: Colors.white60, fontSize: 11);
+                    }),
                   ),
                 ),
                 home: const Directionality(
@@ -1246,7 +1497,7 @@ jobs:
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.error_outline, color: Colors.amber, size: 54),
+                          const Icon(Icons.error_outline, color: kMandarinOrange, size: 54),
                           const SizedBox(height: 14),
                           Text(_errorMsg!, textAlign: TextAlign.center),
                           const SizedBox(height: 20),
@@ -1265,7 +1516,7 @@ jobs:
               }
               if (!_isReady) {
                 return const Scaffold(
-                  body: Center(child: CircularProgressIndicator(color: Color(0xFF10B981))),
+                  body: Center(child: CircularProgressIndicator(color: kMandarinOrange)),
                 );
               }
               return MainCommercialShell(engine: _engine);
@@ -1359,11 +1610,23 @@ jobs:
 
                   return Scaffold(
                     appBar: AppBar(
-                      backgroundColor: const Color(0xFF0F172A),
-                      title: Text(fullName.isNotEmpty ? "$fullName (#$myId)" : "حساب رقم #$myId"),
+                      title: Row(
+                        children: [
+                          Container(
+                            width: 10,
+                            height: 10,
+                            decoration: BoxDecoration(
+                              color: widget.engine.isVpnActive ? kSuccessGreen : kMandarinOrange,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(fullName.isNotEmpty ? "$fullName (#$myId)" : "حساب رقم #$myId"),
+                        ],
+                      ),
                       actions: [
                         IconButton(
-                          icon: const Icon(Icons.qr_code_2, color: Color(0xFF10B981)),
+                          icon: const Icon(Icons.qr_code_2, color: kMandarinOrange),
                           onPressed: () => _showMyQrSheet(myId),
                         ),
                       ],
@@ -1375,11 +1638,18 @@ jobs:
                             width: double.infinity,
                             margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
                             padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(color: const Color(0xFF064E3B), borderRadius: BorderRadius.circular(12)),
+                            decoration: BoxDecoration(
+                              color: kDarkCard,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: kMandarinOrange),
+                            ),
                             child: Row(
                               children: [
                                 Expanded(child: Text(_feedback, style: const TextStyle(fontSize: 13))),
-                                IconButton(icon: const Icon(Icons.close, size: 18), onPressed: () => setState(() => _feedback = "")),
+                                IconButton(
+                                  icon: const Icon(Icons.close, size: 18, color: kMandarinOrange),
+                                  onPressed: () => setState(() => _feedback = ""),
+                                ),
                               ],
                             ),
                           ),
@@ -1397,7 +1667,6 @@ jobs:
                       ],
                     ),
                     bottomNavigationBar: NavigationBar(
-                      backgroundColor: const Color(0xFF0F172A),
                       selectedIndex: _currentTab,
                       onDestinationSelected: (idx) => setState(() => _currentTab = idx),
                       destinations: const [
@@ -1427,7 +1696,15 @@ jobs:
                   children: [
                     Container(
                       padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(color: const Color(0xFF065F46), borderRadius: BorderRadius.circular(20)),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [kDarkCard, Color(0xFF281A0D)],
+                          begin: Alignment.topRight,
+                          end: Alignment.bottomLeft,
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: kMandarinOrange, width: 1.5),
+                      ),
                       child: Row(
                         children: [
                           Expanded(
@@ -1435,7 +1712,7 @@ jobs:
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 const Text("الرصيد النقدي", style: TextStyle(fontSize: 12, color: Colors.white70)),
-                                Text("$cashBal ريال", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                                Text("$cashBal ريال", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
                               ],
                             ),
                           ),
@@ -1443,8 +1720,11 @@ jobs:
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text("عداد رصيد الاستخدام", style: TextStyle(fontSize: 12, color: Color(0xFF6EE7B7))),
-                                Text("${liveCredit.toStringAsFixed(3)} ريال", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, fontFamily: 'monospace', color: Color(0xFF6EE7B7))),
+                                const Text("عداد رصيد الاستخدام", style: TextStyle(fontSize: 12, color: kMandarinOrange)),
+                                Text(
+                                  "${liveCredit.toStringAsFixed(3)} ريال",
+                                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, fontFamily: 'monospace', color: kMandarinOrange),
+                                ),
                               ],
                             ),
                           ),
@@ -1454,7 +1734,11 @@ jobs:
                     const SizedBox(height: 16),
                     Container(
                       padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
+                      decoration: BoxDecoration(
+                        color: kDarkCard,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: const Color(0xFF334155)),
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
@@ -1462,7 +1746,12 @@ jobs:
                             children: [
                               Expanded(
                                 child: ChoiceChip(
-                                  label: const Text("تحويل نقدي"),
+                                  label: const Center(child: Text("تحويل نقدي")),
+                                  selectedColor: kMandarinOrange,
+                                  labelStyle: TextStyle(
+                                    color: _transferMode == 'cash' ? Colors.black : Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                   selected: _transferMode == 'cash',
                                   onSelected: (_) => setState(() => _transferMode = 'cash'),
                                 ),
@@ -1470,29 +1759,36 @@ jobs:
                               const SizedBox(width: 8),
                               Expanded(
                                 child: ChoiceChip(
-                                  label: const Text("تغذية رصيد استخدام"),
+                                  label: const Center(child: Text("تغذية رصيد استخدام")),
+                                  selectedColor: kMandarinOrange,
+                                  labelStyle: TextStyle(
+                                    color: _transferMode == 'credit' ? Colors.black : Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                   selected: _transferMode == 'credit',
                                   onSelected: (_) => setState(() => _transferMode = 'credit'),
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 10),
+                          const SizedBox(height: 12),
                           Row(
                             children: [
                               Expanded(child: TextField(controller: _receiverCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم الحساب المستلم"))),
+                              const SizedBox(width: 6),
                               TextButton(
+                                style: TextButton.styleFrom(foregroundColor: kMandarinOrange),
                                 onPressed: () => setState(() {
                                   _receiverCtrl.text = myId;
                                   _transferMode = 'credit';
                                 }),
-                                child: const Text("لنفسي"),
+                                child: const Text("لنفسي", style: TextStyle(fontWeight: FontWeight.bold)),
                               ),
                             ],
                           ),
                           const SizedBox(height: 10),
                           TextField(controller: _amountCtrl, keyboardType: TextInputType.number, decoration: _dec("المبلغ بالريال")),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 14),
                           ElevatedButton(
                             onPressed: () async {
                               try {
@@ -1526,8 +1822,9 @@ jobs:
                     for (final k in contactKeys)
                       ListTile(
                         title: Text(_localContacts[k].toString()),
-                        subtitle: Text("حساب #$k"),
+                        subtitle: Text("حساب #$k", style: const TextStyle(color: Colors.white54)),
                         trailing: ElevatedButton(
+                          style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8)),
                           onPressed: () => setState(() => _receiverCtrl.text = k.toString()),
                           child: const Text("اختيار"),
                         ),
@@ -1559,48 +1856,95 @@ jobs:
                   children: [
                     Container(
                       padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(20)),
+                      decoration: BoxDecoration(
+                        color: kDarkCard,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: widget.engine.isVpnActive ? kMandarinOrange : const Color(0xFF334155),
+                          width: 2,
+                        ),
+                      ),
                       child: Column(
                         children: [
                           Text(
                             widget.engine.isVpnActive
                                 ? "متصل بشبكة: ${widget.engine.currentHostName} (${widget.engine.liveSpeedKbps.toStringAsFixed(1)} KB/s)"
                                 : "الإنترنت مقفول (يتطلب شبكة ميكروتك مفعلة)",
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                              color: widget.engine.isVpnActive ? kMandarinOrange : Colors.white70,
+                            ),
                             textAlign: TextAlign.center,
                           ),
-                          const SizedBox(height: 12),
-                          Text(
-                            "${liveBalanceYer.toStringAsFixed(4)} ريال",
-                            style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, fontFamily: 'monospace', color: Color(0xFF10B981)),
+                          const SizedBox(height: 14),
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                            decoration: BoxDecoration(
+                              color: kDarkBg,
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(color: kMandarinOrange.withOpacity(0.5)),
+                            ),
+                            child: Text(
+                              "${liveBalanceYer.toStringAsFixed(4)} ريال",
+                              style: const TextStyle(
+                                fontSize: 32,
+                                fontWeight: FontWeight.w900,
+                                fontFamily: 'monospace',
+                                color: kMandarinOrange,
+                              ),
+                            ),
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 14),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
-                              Text("الصرف: ${sessionSpentYer.toStringAsFixed(4)} ريال", style: const TextStyle(color: Colors.amber, fontFamily: 'monospace')),
-                              Text("مستهلك: ${usedMb.toStringAsFixed(3)} MB", style: const TextStyle(fontFamily: 'monospace')),
-                              Text("متبقي: ${remMb.toStringAsFixed(3)} MB", style: const TextStyle(color: Color(0xFF6EE7B7), fontFamily: 'monospace')),
+                              Text("الصرف: ${sessionSpentYer.toStringAsFixed(4)} ريال", style: const TextStyle(color: Colors.amber, fontFamily: 'monospace', fontSize: 12)),
+                              Text("مستهلك: ${usedMb.toStringAsFixed(3)} MB", style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                              Text("متبقي: ${remMb.toStringAsFixed(3)} MB", style: const TextStyle(color: kMandarinOrange, fontFamily: 'monospace', fontSize: 12)),
                             ],
                           ),
                           const SizedBox(height: 12),
-                          LinearProgressIndicator(value: tankProgress, minHeight: 8, color: const Color(0xFF10B981)),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: LinearProgressIndicator(
+                              value: tankProgress,
+                              minHeight: 10,
+                              backgroundColor: kDarkBg,
+                              color: kMandarinOrange,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            "الدفعة: $chunkMaxMb MB | التجديد التلقائي عند: $triggerMb MB",
+                            style: const TextStyle(fontSize: 11, color: Colors.white54),
+                          ),
                           const SizedBox(height: 6),
-                          Text("الدفعة: $chunkMaxMb MB | التجديد التلقائي عند: $triggerMb MB", style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: kDarkBg,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              "⚡ كاش DNS المحلي: ${widget.engine.dnsCacheEntries} نطاق مخزن | ${widget.engine.dnsCacheHits} استجابة فورية",
+                              style: const TextStyle(fontSize: 11, color: kSuccessGreen, fontWeight: FontWeight.bold),
+                            ),
+                          ),
                           const SizedBox(height: 16),
                           SizedBox(
                             width: double.infinity,
                             child: ElevatedButton(
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: widget.engine.isVpnActive ? Colors.redAccent : const Color(0xFF10B981),
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                backgroundColor: widget.engine.isVpnActive ? Colors.redAccent : kMandarinOrange,
+                                foregroundColor: widget.engine.isVpnActive ? Colors.white : Colors.black,
+                                padding: const EdgeInsets.symmetric(vertical: 15),
                               ),
                               onPressed: () async {
                                 try {
                                   if (!widget.engine.isVpnActive) {
                                     await widget.engine.startSmartConnection(w);
-                                    setState(() => _feedback = "✅ تم التحقق من بصمة الميكروتك وفتح النفق على (${widget.engine.currentHostName})");
+                                    setState(() => _feedback = "✅ تم التحقق من بصمة الميكروتك وتفعيل كاش DNS وفتح النفق على (${widget.engine.currentHostName})");
                                   } else {
                                     await widget.engine.stopSmartConnection();
                                     setState(() => _feedback = "🔒 تم إيقاف الإنترنت وحفظ قراءة العداد");
@@ -1615,6 +1959,10 @@ jobs:
                           if (widget.engine.isVpnActive) ...[
                             const SizedBox(height: 10),
                             OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: kMandarinOrange,
+                                side: const BorderSide(color: kMandarinOrange),
+                              ),
                               onPressed: () async {
                                 try {
                                   await _animateTestFuelPump(25);
@@ -1629,13 +1977,20 @@ jobs:
                       ),
                     ),
                     const SizedBox(height: 16),
-                    SwitchListTile(
-                      title: const Text("الوضع الاقتصادي لتوفير الرصيد"),
-                      value: ecoMode,
-                      onChanged: (val) async {
-                        await widget.engine.toggleMyEcoMode(val);
-                        setState(() => _feedback = val ? "✅ تم تفعيل الوضع الاقتصادي" : "تم إيقاف الوضع الاقتصادي");
-                      },
+                    Container(
+                      decoration: BoxDecoration(
+                        color: kDarkCard,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: SwitchListTile(
+                        activeColor: kMandarinOrange,
+                        title: const Text("الوضع الاقتصادي لتوفير الرصيد"),
+                        value: ecoMode,
+                        onChanged: (val) async {
+                          await widget.engine.toggleMyEcoMode(val);
+                          setState(() => _feedback = val ? "✅ تم تفعيل الوضع الاقتصادي" : "تم إيقاف الوضع الاقتصادي");
+                        },
+                      ),
                     ),
                   ],
                 ),
@@ -1690,16 +2045,22 @@ jobs:
                   return Container(
                     margin: const EdgeInsets.only(bottom: 12),
                     padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(14)),
+                    decoration: BoxDecoration(
+                      color: kDarkCard,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFF334155)),
+                    ),
                     child: Column(
                       children: [
                         SwitchListTile(
+                          activeColor: kMandarinOrange,
                           title: Text("$localName (#$childId)"),
                           subtitle: Text(locked ? "مقفل حالياً" : "مسموح بالاستخدام"),
                           value: !locked,
                           onChanged: (allow) => db.collection('wallets').doc(childId).update({'parental_locked': !allow}),
                         ),
                         SwitchListTile(
+                          activeColor: kMandarinOrange,
                           title: const Text("فرض الوضع الاقتصادي"),
                           value: childEco,
                           onChanged: (v) => db.collection('wallets').doc(childId).update({'eco_mode': v}),
@@ -1738,14 +2099,19 @@ jobs:
                             Container(
                               margin: const EdgeInsets.only(bottom: 16),
                               padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(color: const Color(0xFF1E3A8A), borderRadius: BorderRadius.circular(18)),
+                              decoration: BoxDecoration(
+                                color: kDarkCard,
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(color: kMandarinOrange, width: 1.5),
+                              ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text("📡 مستحقات شبكتي: $netName", style: const TextStyle(fontWeight: FontWeight.bold)),
+                                  Text("📡 مستحقات شبكتي: $netName", style: const TextStyle(fontWeight: FontWeight.bold, color: kMandarinOrange)),
                                   Text("إجمالي الدفعات المباعة: ${wanMb.toStringAsFixed(0)} MB"),
                                   Text("الرصيد المتاح للسحب: $dueYer ريال", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.amber)),
                                   SwitchListTile(
+                                    activeColor: kMandarinOrange,
                                     contentPadding: EdgeInsets.zero,
                                     title: const Text("تحويل المستحقات تلقائياً إلى محفظتي"),
                                     value: autoTransfer,
@@ -1795,17 +2161,21 @@ jobs:
             void _showMyQrSheet(String myId) {
               showModalBottomSheet(
                 context: context,
-                backgroundColor: const Color(0xFF1E293B),
+                backgroundColor: kDarkCard,
                 builder: (ctx) => Padding(
                   padding: const EdgeInsets.all(24),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text("رمز الحساب #$myId", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                      Text("رمز الحساب #$myId", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: kMandarinOrange)),
                       const SizedBox(height: 16),
                       Container(
                         padding: const EdgeInsets.all(12),
-                        color: Colors.white,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: kMandarinOrange, width: 3),
+                        ),
                         child: QrImageView(data: myId, version: QrVersions.auto, size: 180.0),
                       ),
                     ],
