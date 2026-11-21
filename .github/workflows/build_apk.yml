@@ -23,8 +23,12 @@ jobs:
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
+          cache: true
 
-      - name: Generate LVNO SmartClient V6.9.2 (Fixed Gradle + Custom Icon + Dark Orange UI + Block-Only DNS)
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate LVNO SmartClient V6.9.3 (Fast Cache + Custom Icon + Dark Orange UI + Block-Only DNS)
         shell: python
         run: |
           import os, sys, shutil, json, subprocess, re, textwrap
@@ -105,7 +109,7 @@ jobs:
           name: smartclient
           description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
           publish_to: 'none'
-          version: 6.9.2+33
+          version: 6.9.3+34
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -123,6 +127,10 @@ jobs:
           flutter:
             uses-material-design: true
           ''')
+
+          for old_src in ["android/app/src/main/java", "android/app/src/main/kotlin"]:
+              if os.path.exists(old_src):
+                  shutil.rmtree(old_src)
 
           kt_dir = "android/app/src/main/kotlin/com/lvno/smartclient"
           os.makedirs(kt_dir, exist_ok=True)
@@ -2222,10 +2230,18 @@ jobs:
           if os.path.exists(gw_prop):
               with open(gw_prop, "r", encoding="utf-8") as gwf:
                   gwtxt = gwf.read()
-              gwtxt = re.sub(r"gradle-[0-9.]+-all\.zip", "gradle-8.7-all.zip", gwtxt)
-              gwtxt = re.sub(r"gradle-[0-9.]+-bin\.zip", "gradle-8.7-all.zip", gwtxt)
+              gwtxt = re.sub(r"gradle-[0-9.]+-all\.zip", "gradle-8.7-bin.zip", gwtxt)
+              gwtxt = re.sub(r"gradle-[0-9.]+-bin\.zip", "gradle-8.7-bin.zip", gwtxt)
               with open(gw_prop, "w", encoding="utf-8") as gwf:
                   gwf.write(gwtxt)
+
+          g_prop = "android/gradle.properties"
+          if os.path.exists(g_prop):
+              with open(g_prop, "r", encoding="utf-8") as gpf:
+                  gptxt = gpf.read()
+              gptxt = re.sub(r"org\.gradle\.jvmargs=.*", "org.gradle.jvmargs=-Xmx3G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8", gptxt)
+              with open(g_prop, "w", encoding="utf-8") as gpf:
+                  gpf.write(gptxt)
 
           if os.path.exists("android/app/build.gradle.kts"):
               os.remove("android/app/build.gradle.kts")
@@ -2256,8 +2272,8 @@ jobs:
                   applicationId = "com.lvno.smartclient"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 33
-                  versionName = "6.9.2"
+                  versionCode = 34
+                  versionName = "6.9.3"
                   multiDexEnabled = true
               }
 
@@ -2283,8 +2299,20 @@ jobs:
       - name: Install Flutter Dependencies
         run: flutter pub get
 
+      - name: Analyze Dart Code
+        run: flutter analyze --no-fatal-infos
+
       - name: Build Release APK
-        run: flutter build apk --release --no-shrink
+        shell: bash
+        run: |
+          set -o pipefail
+          flutter build apk --release --no-shrink 2>&1 | tee /tmp/build.log
+
+      - name: Show Error Summary on Failure
+        if: failure()
+        run: |
+          echo "=== LAST 80 LINES OF BUILD LOG ==="
+          tail -n 80 /tmp/build.log || true
 
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
