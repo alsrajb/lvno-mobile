@@ -28,7 +28,7 @@ jobs:
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate LVNO SmartClient V6.9.3 (Fast Cache + Custom Icon + Dark Orange UI + Block-Only DNS)
+      - name: Generate LVNO SmartClient V6.9.4 (Kotlin Fix + Custom Icon + Dark Orange UI + Block-Only DNS)
         shell: python
         run: |
           import os, sys, shutil, json, subprocess, re, textwrap
@@ -87,6 +87,7 @@ jobs:
                   os.makedirs(target_dir, exist_ok=True)
                   resized = img.resize((size, size), Image.Resampling.LANCZOS)
                   resized.save(os.path.join(target_dir, "ic_launcher.png"), "PNG")
+                  resized.save(os.path.join(target_dir, "ic_launcher_round.png"), "PNG")
               for anydpi in ["mipmap-anydpi-v26", "mipmap-anydpi"]:
                   any_dir = os.path.join(res_dir, anydpi)
                   if os.path.exists(any_dir):
@@ -109,7 +110,7 @@ jobs:
           name: smartclient
           description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
           publish_to: 'none'
-          version: 6.9.3+34
+          version: 6.9.4+35
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -267,10 +268,10 @@ jobs:
                                       wanBytesCount.addAndGet(length.toLong())
                                   }
                                   if (ecoModeEnabled.get() && length > 1100) {
-                                      Thread.sleep(6)
+                                      Thread.sleep(6L)
                                   }
                               } else {
-                                  Thread.sleep(10)
+                                  Thread.sleep(10L)
                               }
                           } catch (_: Exception) {
                               break
@@ -2272,8 +2273,8 @@ jobs:
                   applicationId = "com.lvno.smartclient"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 34
-                  versionName = "6.9.3"
+                  versionCode = 35
+                  versionName = "6.9.4"
                   multiDexEnabled = true
               }
 
