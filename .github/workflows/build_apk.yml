@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -28,7 +29,7 @@ jobs:
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate LVNO SmartClient V6.9.6 (Typed Kotlin + Custom Icon + Dark Orange UI + Block-Only DNS)
+      - name: Generate LVNO SmartClient V6.9.7
         shell: python
         run: |
           import os, sys, shutil, json, subprocess, re, textwrap
@@ -37,7 +38,8 @@ jobs:
           icon_found = False
 
           for root, dirs, files in os.walk("."):
-              if ".git" in root: continue
+              if ".git" in root:
+                  continue
               for f in files:
                   full_p = os.path.join(root, f)
                   if f.startswith("google-services.json"):
@@ -62,10 +64,15 @@ jobs:
 
           for item in os.listdir("."):
               if item not in [".git", ".github"]:
-                  if os.path.isdir(item): shutil.rmtree(item)
-                  else: os.remove(item)
+                  if os.path.isdir(item):
+                      shutil.rmtree(item)
+                  else:
+                      os.remove(item)
 
-          subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
+          subprocess.run(
+              ["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."],
+              check=True,
+          )
 
           if icon_found and os.path.exists("/tmp/app_icon_src"):
               subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", "--quiet", "Pillow"], check=True)
@@ -113,7 +120,7 @@ jobs:
           name: smartclient
           description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
           publish_to: 'none'
-          version: 6.9.6+37
+          version: 6.9.7+38
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -515,8 +522,8 @@ jobs:
                                       matched = verifyMikroTikSignature("10.99.99.1", "gateway.lvno.local")
                                   }
                                   runOnUiThread { result.success(matched) }
-                              }.start()
-                          }
+                          }.start()
+                      }
                           "scanQrNative" -> {
                               try {
                                   val intent = Intent("com.google.zxing.client.android.SCAN")
@@ -2261,7 +2268,7 @@ jobs:
 
           android {
               namespace = "com.lvno.smartclient"
-              compileSdk = 34
+              compileSdk = 35
               ndkVersion = flutter.ndkVersion
 
               compileOptions {
@@ -2282,8 +2289,8 @@ jobs:
                   applicationId = "com.lvno.smartclient"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 37
-                  versionName = "6.9.6"
+                  versionCode = 38
+                  versionName = "6.9.7"
                   multiDexEnabled = true
               }
 
