@@ -24,7 +24,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Generate Compact LVNO V6 Project (Working Base + Orange Icon + Dark Orange UI + Block-Only DNS)
+      - name: Generate Compact LVNO V6 Project (100MB Sync + Auto-Reconnect + Camera QR + Dark Orange UI)
         shell: python
         run: |
           import os, sys, shutil, json, subprocess, re, textwrap
@@ -101,7 +101,7 @@ jobs:
           name: smartclient
           description: Unified Commercial Network App
           publish_to: 'none'
-          version: 6.5.1+22
+          version: 6.6.0+23
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -115,6 +115,7 @@ jobs:
             http: ^1.2.2
             crypto: ^3.0.5
             qr_flutter: ^4.1.0
+            mobile_scanner: ^5.2.3
 
           flutter:
             uses-material-design: true
@@ -266,6 +267,9 @@ jobs:
                                   Thread.sleep(12L)
                               }
                           } catch (e: Exception) {
+                              isRunning.set(false)
+                              try { vpnInterface?.close() } catch (_: Exception) {}
+                              vpnInterface = null
                               break
                           }
                       }
@@ -401,6 +405,11 @@ jobs:
                   stopSelf()
               }
 
+              override fun onRevoke() {
+                  stopVpnTunnel()
+                  super.onRevoke()
+              }
+
               override fun onDestroy() {
                   stopVpnTunnel()
                   super.onDestroy()
@@ -437,7 +446,7 @@ jobs:
                   var socket: DatagramSocket? = null
                   try {
                       socket = DatagramSocket()
-                      socket.soTimeout = 1000
+                      socket.soTimeout = 1500
                       val out = ByteArrayOutputStream()
                       out.write(byteArrayOf(0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
                       for (part in domainToQuery.split(".")) {
@@ -613,6 +622,8 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-feature android:name="android.hardware.camera" android:required="false"/>
 
               <application
                   android:label="نت سباي"
@@ -660,6 +671,7 @@ jobs:
           import 'package:cloud_firestore/cloud_firestore.dart';
           import 'package:http/http.dart' as http;
           import 'package:qr_flutter/qr_flutter.dart';
+          import 'package:mobile_scanner/mobile_scanner.dart';
 
           const Color kDarkBg = Color(0xFF0B1120);
           const Color kDarkSurface = Color(0xFF0F172A);
@@ -697,6 +709,11 @@ jobs:
             bool isVpnActive = false;
             bool ecoMode = false;
             bool isPurchasingChunk = false;
+            bool isReconnecting = false;
+            int reconnectAttempt = 0;
+            static const int maxReconnectAttempts = 3;
+            bool _userRequestedStop = false;
+            bool _isParentalLocked = false;
 
             int activeChunkTotalBytes = 0;
             int activeChunkConsumedBytes = 0;
@@ -709,7 +726,6 @@ jobs:
             int blockedDnsCount = 0;
             int blockedRulesCount = 0;
             int _saveTickCounter = 0;
-            int _routerVerifyTickCounter = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -930,10 +946,16 @@ jobs:
               }
             }
 
+            // التحقق من الشبكة وفتح بوابة الميكروتك مرتبط بدورة شراء كل دفعة 100 ميجابايت
             Future<void> purchaseQuotaChunkFromServer() async {
               if (isPurchasingChunk) return;
               isPurchasingChunk = true;
               try {
+                final bool onVerifiedMikroTik = await discoverAndVerifyPhysicalNetwork();
+                if (!onVerifiedMikroTik) {
+                  throw Exception("⛔ تعذر شراء الدفعة: أنت خارج نطاق شبكة الميكروتك المفعلة");
+                }
+
                 final db = FirebaseFirestore.instance;
                 final wRef = db.collection('wallets').doc(walletId);
                 final hRef = db.collection('hosts').doc(currentHostId);
@@ -1034,6 +1056,7 @@ jobs:
                 currentDynamicSecret = (result['secret'] ?? '').toString();
 
                 await persistQuotaState();
+                await knockMikroTikGateway(unlock: true);
                 isPurchasingChunk = false;
               } catch (e) {
                 isPurchasingChunk = false;
@@ -1041,9 +1064,67 @@ jobs:
               }
             }
 
-            Future<void> pollAndConsumeTrafficTick() async {
+            Future<void> attemptAutoReconnect(
+              Map<String, dynamic> wData,
+              void Function(String msg) onFeedback,
+              VoidCallback onUiRefresh,
+            ) async {
+              if (isReconnecting || _userRequestedStop || _isParentalLocked) return;
+              final bool hasQuotaOrCredit = (activeChunkTotalBytes - activeChunkConsumedBytes) > 512 * 1024 || serverCreditBalanceYer > 0;
+              if (!hasQuotaOrCredit) return;
+
+              isReconnecting = true;
+              reconnectAttempt = 0;
+              onUiRefresh();
+
+              for (int i = 1; i <= maxReconnectAttempts; i++) {
+                if (_userRequestedStop || _isParentalLocked) break;
+                reconnectAttempt = i;
+                onFeedback("🔄 انقطع النفق، جاري معاودة الاتصال تلقائياً ($i/$maxReconnectAttempts)...");
+                onUiRefresh();
+
+                await Future.delayed(const Duration(seconds: 3));
+                if (_userRequestedStop || _isParentalLocked) break;
+
+                try {
+                  final ok = await startSmartConnection(wData, isAutoRetry: true);
+                  if (ok) {
+                    isReconnecting = false;
+                    reconnectAttempt = 0;
+                    onFeedback("✅ تمت معاودة الاتصال بالنفق تلقائياً");
+                    onUiRefresh();
+                    return;
+                  }
+                } catch (_) {}
+              }
+
+              isReconnecting = false;
+              reconnectAttempt = 0;
+              if (!_userRequestedStop) {
+                onFeedback("⚠️ تعذرت معاودة الاتصال تلقائياً، اضغط تشغيل للمحاولة يدوياً");
+              }
+              onUiRefresh();
+            }
+
+            Future<void> pollAndConsumeTrafficTick(
+              Map<String, dynamic> wData,
+              void Function(String msg) onFeedback,
+              VoidCallback onUiRefresh,
+            ) async {
               if (!isVpnActive) return;
               try {
+                final bool nativeRunning = await _vpnChannel.invokeMethod<bool>('isVpnRunning') ?? false;
+                if (!nativeRunning) {
+                  isVpnActive = false;
+                  liveSpeedKbps = 0.0;
+                  await persistQuotaState();
+                  onUiRefresh();
+                  if (!_userRequestedStop && !_isParentalLocked) {
+                    await attemptAutoReconnect(wData, onFeedback, onUiRefresh);
+                  }
+                  return;
+                }
+
                 final raw = await _vpnChannel.invokeMethod('getTrafficStats');
                 final Map? res = raw as Map?;
                 final int wBytes = ((res?['wanBytes'] ?? 0) as num).toInt();
@@ -1068,28 +1149,19 @@ jobs:
                   await persistQuotaState();
                 }
 
-                _routerVerifyTickCounter++;
-                if (_routerVerifyTickCounter >= 50) {
-                  _routerVerifyTickCounter = 0;
-                  final stillOnRouter = await discoverAndVerifyPhysicalNetwork();
-                  if (!stillOnRouter) {
-                    await stopSmartConnection();
-                    return;
-                  }
-                  await knockMikroTikGateway(unlock: true);
-                }
-
                 final int remBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
                 int lowWaterMb = serverChunkSizeMb - serverRefillTriggerMb;
                 if (lowWaterMb < 5) lowWaterMb = 5;
 
+                // التجديد التلقائي عند الوصول لنقطة التعبئة (80 MB) والتحقق من الشبكة مع كل دفعة 100 MB
                 if (remBytes <= lowWaterMb * 1024 * 1024 && !isPurchasingChunk && serverCreditBalanceYer > 0) {
                   try {
                     await purchaseQuotaChunkFromServer();
                   } catch (_) {}
                 }
                 if (activeChunkTotalBytes - activeChunkConsumedBytes <= 0 && !isPurchasingChunk) {
-                  await stopSmartConnection();
+                  await stopSmartConnection(userInitiated: false);
+                  onFeedback("🔒 انتهت الدفعة الحالية ولا يوجد رصيد كافٍ للتجديد");
                 }
               } catch (_) {}
             }
@@ -1139,6 +1211,7 @@ jobs:
               final int limitMins = ((wData['daily_time_limit_mins'] ?? 0) as num).toInt();
               final int usedMins = ((wData['used_time_today_mins'] ?? 0) as num).toInt();
               final bool timeExpired = (limitMins > 0 && usedMins >= limitMins);
+              _isParentalLocked = locked || timeExpired;
 
               final List cats = (wData['blocked_categories'] as List?) ?? [];
               final List<String> parts = [];
@@ -1150,15 +1223,26 @@ jobs:
               try {
                 await _vpnChannel.invokeMethod('updatePolicy', {
                   'ecoMode': ecoMode,
-                  'parentalLocked': locked || timeExpired,
+                  'parentalLocked': _isParentalLocked,
                   'blockedCsv': parts.join(','),
                 });
-                if (locked || timeExpired) isVpnActive = false;
+                if (_isParentalLocked) {
+                  _userRequestedStop = true;
+                  isReconnecting = false;
+                  isVpnActive = false;
+                }
               } catch (_) {}
             }
 
-            Future<bool> startSmartConnection(Map<String, dynamic> wData) async {
+            Future<bool> startSmartConnection(Map<String, dynamic> wData, {bool isAutoRetry = false}) async {
+              if (!isAutoRetry) {
+                _userRequestedStop = false;
+                reconnectAttempt = 0;
+                isReconnecting = false;
+              }
+
               if ((wData['parental_locked'] ?? false) == true) {
+                _isParentalLocked = true;
                 throw Exception("تم إيقاف الاستخدام مؤقتاً من قِبل المشرف العائلي");
               }
 
@@ -1179,7 +1263,10 @@ jobs:
               return isVpnActive;
             }
 
-            Future<void> stopSmartConnection() async {
+            Future<void> stopSmartConnection({bool userInitiated = true}) async {
+              _userRequestedStop = true;
+              isReconnecting = false;
+              reconnectAttempt = 0;
               liveSpeedKbps = 0.0;
               currentHostName = "غير متصل بشبكة مفعلة";
               await persistQuotaState();
@@ -1497,10 +1584,15 @@ jobs:
             final TextEditingController _receiverCtrl = TextEditingController();
             final TextEditingController _amountCtrl = TextEditingController(text: "1000");
             final TextEditingController _searchContactCtrl = TextEditingController();
+            final TextEditingController _childIdCtrl = TextEditingController();
+            final TextEditingController _childNameCtrl = TextEditingController();
+            final TextEditingController _mgmtIdCtrl = TextEditingController();
+            final TextEditingController _mgmtNameCtrl = TextEditingController();
             String _transferMode = "cash";
             String _feedback = "";
             Map _localContacts = {};
             String _searchQuery = "";
+            Map<String, dynamic> _latestWalletDoc = {};
             Timer? _uiFuelTimer;
 
             @override
@@ -1509,7 +1601,15 @@ jobs:
               _loadContacts();
               _uiFuelTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
                 if (widget.engine.isVpnActive) {
-                  await widget.engine.pollAndConsumeTrafficTick();
+                  await widget.engine.pollAndConsumeTrafficTick(
+                    _latestWalletDoc,
+                    (msg) {
+                      if (mounted) setState(() => _feedback = msg);
+                    },
+                    () {
+                      if (mounted) setState(() {});
+                    },
+                  );
                   if (mounted) setState(() {});
                 }
               });
@@ -1518,12 +1618,32 @@ jobs:
             @override
             void dispose() {
               _uiFuelTimer?.cancel();
+              _receiverCtrl.dispose();
+              _amountCtrl.dispose();
+              _searchContactCtrl.dispose();
+              _childIdCtrl.dispose();
+              _childNameCtrl.dispose();
+              _mgmtIdCtrl.dispose();
+              _mgmtNameCtrl.dispose();
               super.dispose();
             }
 
             Future<void> _loadContacts() async {
               final map = await widget.engine.getLocalContacts();
               if (mounted) setState(() => _localContacts = map);
+            }
+
+            Future<String?> _scanQrWithCamera(String title) async {
+              if (!mounted) return null;
+              return await showModalBottomSheet<String>(
+                context: context,
+                isScrollControlled: true,
+                backgroundColor: kDarkCard,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                builder: (ctx) => _CameraQrScannerModal(title: title),
+              );
             }
 
             Future<void> _animateTestFuelPump(int mbToConsume) async {
@@ -1545,7 +1665,7 @@ jobs:
                 await widget.engine.purchaseQuotaChunkFromServer();
               }
               if (widget.engine.activeChunkTotalBytes - widget.engine.activeChunkConsumedBytes <= 0) {
-                await widget.engine.stopSmartConnection();
+                await widget.engine.stopSmartConnection(userInitiated: false);
               }
               if (mounted) setState(() {});
             }
@@ -1562,6 +1682,7 @@ jobs:
                       ? (walletSnap.data!.data() as Map<String, dynamic>)
                       : <String, dynamic>{};
 
+                  _latestWalletDoc = w;
                   widget.engine.syncDevicePolicyFromWalletDoc(w);
 
                   final int cashBal = ((w['cash_balance_yer'] ?? 0) as num).toInt();
@@ -1587,7 +1708,7 @@ jobs:
                       ),
                       actions: [
                         IconButton(
-                          icon: const Icon(Icons.qr_code_2, color: kMandarinOrange),
+                          icon: const Icon(Icons.qr_code_2, color: kMandarinOrange, size: 28),
                           onPressed: () => _showMyQrSheet(myId),
                         ),
                       ],
@@ -1751,7 +1872,32 @@ jobs:
                           const SizedBox(height: 10),
                           Row(
                             children: [
-                              Expanded(child: TextField(controller: _receiverCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم الحساب المستلم"))),
+                              Expanded(
+                                child: TextField(
+                                  controller: _receiverCtrl,
+                                  keyboardType: TextInputType.number,
+                                  decoration: _dec("رقم الحساب المستلم"),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: kMandarinOrange,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: IconButton(
+                                  icon: const Icon(Icons.qr_code_scanner, color: Colors.black),
+                                  tooltip: "مسح رمز المستلم بالكاميرا",
+                                  onPressed: () async {
+                                    final scanned = await _scanQrWithCamera("مسح رمز QR للحساب المستلم");
+                                    if (scanned != null && scanned.isNotEmpty) {
+                                      setState(() {
+                                        _receiverCtrl.text = scanned.replaceAll('LINK:', '').trim();
+                                      });
+                                    }
+                                  },
+                                ),
+                              ),
                               TextButton(
                                 style: TextButton.styleFrom(foregroundColor: kMandarinOrange),
                                 onPressed: () => setState(() {
@@ -1844,11 +1990,15 @@ jobs:
                           Text(
                             widget.engine.isVpnActive
                                 ? "متصل بشبكة: ${widget.engine.currentHostName} (${widget.engine.liveSpeedKbps.toStringAsFixed(1)} KB/s)"
-                                : "الإنترنت مقفول (يتطلب شبكة ميكروتك مفعلة)",
+                                : (widget.engine.isReconnecting
+                                    ? "🔄 جاري معاودة الاتصال بالنفق (${widget.engine.reconnectAttempt}/${SmartClientEngine.maxReconnectAttempts})..."
+                                    : "الإنترنت مقفول (يتطلب شبكة ميكروتك مفعلة)"),
                             style: TextStyle(
                               fontWeight: FontWeight.bold,
                               fontSize: 14,
-                              color: widget.engine.isVpnActive ? kMandarinOrange : Colors.white70,
+                              color: widget.engine.isVpnActive
+                                  ? kMandarinOrange
+                                  : (widget.engine.isReconnecting ? Colors.amber : Colors.white70),
                             ),
                             textAlign: TextAlign.center,
                           ),
@@ -1877,7 +2027,7 @@ jobs:
                           const SizedBox(height: 12),
                           LinearProgressIndicator(value: tankProgress, minHeight: 8, backgroundColor: kDarkBg, color: kMandarinOrange),
                           const SizedBox(height: 6),
-                          Text("الدفعة: $chunkMaxMb MB | التجديد التلقائي عند: $triggerMb MB", style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                          Text("الدفعة: $chunkMaxMb MB | التحقق والتجديد عند: $triggerMb MB", style: const TextStyle(fontSize: 11, color: Colors.white54)),
                           const SizedBox(height: 6),
                           Text(
                             widget.engine.blockedRulesCount > 0
@@ -1900,7 +2050,7 @@ jobs:
                                     await widget.engine.startSmartConnection(w);
                                     setState(() => _feedback = "✅ تم التحقق من بصمة الميكروتك وفتح النفق على (${widget.engine.currentHostName})");
                                   } else {
-                                    await widget.engine.stopSmartConnection();
+                                    await widget.engine.stopSmartConnection(userInitiated: true);
                                     setState(() => _feedback = "🔒 تم إيقاف الإنترنت وحفظ قراءة العداد");
                                   }
                                 } catch (e) {
@@ -1952,23 +2102,51 @@ jobs:
             }
 
             Widget _buildParentalTab(List linkedChildren) {
-              final childIdCtrl = TextEditingController();
-              final childNameCtrl = TextEditingController();
-
               return SingleChildScrollView(
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    TextField(controller: childIdCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم حساب جهاز العائلة")),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _childIdCtrl,
+                            keyboardType: TextInputType.number,
+                            decoration: _dec("رقم حساب جهاز العائلة"),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: kMandarinOrange,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: IconButton(
+                            icon: const Icon(Icons.qr_code_scanner, color: Colors.black),
+                            tooltip: "مسح رمز جهاز العائلة بالكاميرا",
+                            onPressed: () async {
+                              final scanned = await _scanQrWithCamera("مسح رمز QR لجهاز العائلة");
+                              if (scanned != null && scanned.isNotEmpty) {
+                                setState(() {
+                                  _childIdCtrl.text = scanned.replaceAll('LINK:', '').trim();
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 8),
-                    TextField(controller: childNameCtrl, decoration: _dec("الاسم المحلي على جهازك")),
+                    TextField(controller: _childNameCtrl, decoration: _dec("الاسم المحلي على جهازك")),
                     const SizedBox(height: 10),
                     ElevatedButton(
                       onPressed: () async {
                         try {
-                          await widget.engine.linkFamilyMemberDevice(childIdCtrl.text, childNameCtrl.text);
+                          await widget.engine.linkFamilyMemberDevice(_childIdCtrl.text, _childNameCtrl.text);
                           await _loadContacts();
+                          _childIdCtrl.clear();
+                          _childNameCtrl.clear();
                           setState(() => _feedback = "✅ تم ربط الجهاز بنجاح");
                         } catch (e) {
                           setState(() => _feedback = "⚠️ ${e.toString().replaceAll('Exception: ', '')}");
@@ -2059,8 +2237,6 @@ jobs:
             }
 
             Widget _buildManagementTab(String myId) {
-              final idCtrl = TextEditingController();
-              final nameCtrl = TextEditingController();
               final db = FirebaseFirestore.instance;
 
               return SingleChildScrollView(
@@ -2127,17 +2303,48 @@ jobs:
                         return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: cards);
                       },
                     ),
-                    TextField(controller: idCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم الحساب للحفظ محلياً (مثال: 1002)")),
+                    TextField(controller: _mgmtIdCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم الحساب للحفظ محلياً (مثال: 1002)")),
                     const SizedBox(height: 8),
-                    TextField(controller: nameCtrl, decoration: _dec("الاسم المحلي")),
+                    TextField(controller: _mgmtNameCtrl, decoration: _dec("الاسم المحلي")),
                     const SizedBox(height: 10),
                     ElevatedButton(
                       onPressed: () async {
-                        await widget.engine.saveLocalContact(idCtrl.text, nameCtrl.text);
+                        await widget.engine.saveLocalContact(_mgmtIdCtrl.text, _mgmtNameCtrl.text);
                         await _loadContacts();
+                        _mgmtIdCtrl.clear();
+                        _mgmtNameCtrl.clear();
                         setState(() => _feedback = "✅ تم حفظ الاسم محلياً");
                       },
                       child: const Text("حفظ في قائمتي المحلية"),
+                    ),
+                    const SizedBox(height: 20),
+                    Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: kDarkCard,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: kMandarinOrange, width: 2),
+                      ),
+                      child: Column(
+                        children: [
+                          Text("رمز QR لحسابك #$myId", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17, color: kMandarinOrange)),
+                          const SizedBox(height: 14),
+                          Container(
+                            padding: const EdgeInsets.all(18),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(18),
+                              border: Border.all(color: kMandarinOrange, width: 4),
+                            ),
+                            child: QrImageView(
+                              data: myId,
+                              version: QrVersions.auto,
+                              size: 260.0,
+                              backgroundColor: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -2147,25 +2354,149 @@ jobs:
             void _showMyQrSheet(String myId) {
               showModalBottomSheet(
                 context: context,
+                isScrollControlled: true,
                 backgroundColor: kDarkCard,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
                 builder: (ctx) => Padding(
                   padding: const EdgeInsets.all(24),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text("رمز الحساب #$myId", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: kMandarinOrange)),
-                      const SizedBox(height: 16),
+                      Text("رمز الحساب #$myId", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20, color: kMandarinOrange)),
+                      const SizedBox(height: 8),
+                      const Text("امسح هذا الرمز للتحويل أو ربط جهاز العائلة", style: TextStyle(fontSize: 12, color: Colors.white70)),
+                      const SizedBox(height: 18),
                       Container(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.all(18),
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: kMandarinOrange, width: 3),
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(color: kMandarinOrange, width: 4),
                         ),
-                        child: QrImageView(data: myId, version: QrVersions.auto, size: 180.0),
+                        child: QrImageView(
+                          data: myId,
+                          version: QrVersions.auto,
+                          size: 260.0,
+                          backgroundColor: Colors.white,
+                        ),
                       ),
+                      const SizedBox(height: 16),
                     ],
                   ),
+                ),
+              );
+            }
+          }
+
+          class _CameraQrScannerModal extends StatefulWidget {
+            final String title;
+            const _CameraQrScannerModal({required this.title});
+
+            @override
+            State<_CameraQrScannerModal> createState() => _CameraQrScannerModalState();
+          }
+
+          class _CameraQrScannerModalState extends State<_CameraQrScannerModal> {
+            final MobileScannerController _scannerController = MobileScannerController();
+            final TextEditingController _manualInputCtrl = TextEditingController();
+            bool _detected = false;
+
+            @override
+            void dispose() {
+              _scannerController.dispose();
+              _manualInputCtrl.dispose();
+              super.dispose();
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 16,
+                  bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.qr_code_scanner, color: kMandarinOrange, size: 24),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            widget.title,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.flash_on, color: kMandarinOrange),
+                          onPressed: () => _scannerController.toggleTorch(),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: Colors.white70),
+                          onPressed: () => Navigator.pop(context),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: 300,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(18),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            MobileScanner(
+                              controller: _scannerController,
+                              onDetect: (capture) {
+                                if (_detected) return;
+                                for (final barcode in capture.barcodes) {
+                                  final raw = barcode.rawValue;
+                                  if (raw != null && raw.trim().isNotEmpty) {
+                                    _detected = true;
+                                    Navigator.pop(context, raw.trim());
+                                    break;
+                                  }
+                                }
+                              },
+                            ),
+                            Container(
+                              width: 220,
+                              height: 220,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(color: kMandarinOrange, width: 3.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _manualInputCtrl,
+                            keyboardType: TextInputType.number,
+                            decoration: _dec("أو اكتب الرقم يدوياً..."),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: () {
+                            final v = _manualInputCtrl.text.trim();
+                            if (v.isNotEmpty) Navigator.pop(context, v);
+                          },
+                          child: const Text("تأكيد"),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               );
             }
