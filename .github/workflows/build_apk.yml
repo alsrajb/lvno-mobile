@@ -8,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -24,12 +23,8 @@ jobs:
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
-          cache: true
 
-      - name: Setup Gradle Cache
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Generate LVNO SmartClient V6.9.7
+      - name: Generate Compact LVNO V6 Project (Working Base + Orange Icon + Dark Orange UI + Block-Only DNS)
         shell: python
         run: |
           import os, sys, shutil, json, subprocess, re, textwrap
@@ -38,15 +33,13 @@ jobs:
           icon_found = False
 
           for root, dirs, files in os.walk("."):
-              if ".git" in root:
-                  continue
+              if ".git" in root: continue
               for f in files:
                   full_p = os.path.join(root, f)
                   if f.startswith("google-services.json"):
                       shutil.copy2(full_p, "/tmp/google-services.json")
                       try:
-                          with open(full_p, "r", encoding="utf-8") as gf:
-                              gs_data = json.load(gf)
+                          gs_data = json.load(open(full_p))
                       except Exception:
                           pass
                   if f in ["app_icon.png", "app_icon", "app_icon.jpg", "app_icon.jpeg"] and not icon_found:
@@ -64,45 +57,34 @@ jobs:
 
           for item in os.listdir("."):
               if item not in [".git", ".github"]:
-                  if os.path.isdir(item):
-                      shutil.rmtree(item)
-                  else:
-                      os.remove(item)
+                  if os.path.isdir(item): shutil.rmtree(item)
+                  else: os.remove(item)
 
-          subprocess.run(
-              ["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."],
-              check=True,
-          )
+          subprocess.run(["flutter", "create", "--org", "com.lvno", "--project-name", "smartclient", "--platforms=android", "."], check=True)
 
           if icon_found and os.path.exists("/tmp/app_icon_src"):
-              subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", "--quiet", "Pillow"], check=True)
-              from PIL import Image, ImageDraw
-              img = Image.open("/tmp/app_icon_src").convert("RGBA")
-              w, h = img.size
-              for corner in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-                  ImageDraw.floodfill(img, corner, (0, 0, 0, 0), thresh=45)
-
               res_dir = "android/app/src/main/res"
-              for folder, size in [
-                  ("mipmap-mdpi", 48),
-                  ("mipmap-hdpi", 72),
-                  ("mipmap-xhdpi", 96),
-                  ("mipmap-xxhdpi", 144),
-                  ("mipmap-xxxhdpi", 192),
-              ]:
-                  target_dir = os.path.join(res_dir, folder)
-                  os.makedirs(target_dir, exist_ok=True)
-                  for old_f in os.listdir(target_dir):
-                      if old_f.startswith("ic_launcher"):
-                          os.remove(os.path.join(target_dir, old_f))
-                  resized = img.resize((size, size), Image.Resampling.LANCZOS)
-                  resized.save(os.path.join(target_dir, "ic_launcher.png"), "PNG")
-                  resized.save(os.path.join(target_dir, "ic_launcher_round.png"), "PNG")
+              try:
+                  subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", "--quiet", "Pillow"], check=True)
+                  from PIL import Image, ImageDraw
+                  img = Image.open("/tmp/app_icon_src").convert("RGBA")
+                  w, h = img.size
+                  for corner in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+                      ImageDraw.floodfill(img, corner, (0, 0, 0, 0), thresh=45)
+                  for folder, size in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
+                      target_dir = os.path.join(res_dir, folder)
+                      os.makedirs(target_dir, exist_ok=True)
+                      resized = img.resize((size, size), Image.Resampling.LANCZOS)
+                      resized.save(os.path.join(target_dir, "ic_launcher.png"), "PNG")
+              except Exception:
+                  for folder in ["mipmap-mdpi", "mipmap-hdpi", "mipmap-xhdpi", "mipmap-xxhdpi", "mipmap-xxxhdpi"]:
+                      target_dir = os.path.join(res_dir, folder)
+                      os.makedirs(target_dir, exist_ok=True)
+                      shutil.copy2("/tmp/app_icon_src", os.path.join(target_dir, "ic_launcher.png"))
               for anydpi in ["mipmap-anydpi-v26", "mipmap-anydpi"]:
                   any_dir = os.path.join(res_dir, anydpi)
                   if os.path.exists(any_dir):
                       shutil.rmtree(any_dir)
-              print("CUSTOM_APP_ICON_INSTALLED_OK")
 
           if os.path.exists("test"):
               shutil.rmtree("test")
@@ -113,14 +95,13 @@ jobs:
           def write_clean(path, text):
               norm = text.replace("\u00a0", " ")
               cleaned = textwrap.dedent(norm).strip() + "\n"
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(cleaned)
+              open(path, "w", encoding="utf-8").write(cleaned)
 
           write_clean("pubspec.yaml", r'''
           name: smartclient
-          description: LVNO Unified Network App - Dark Orange + Block-Only DNS + Custom Icon
+          description: Unified Commercial Network App
           publish_to: 'none'
-          version: 6.9.7+38
+          version: 6.5.1+22
 
           environment:
             sdk: '>=3.2.0 <4.0.0'
@@ -139,10 +120,6 @@ jobs:
             uses-material-design: true
           ''')
 
-          for old_src in ["android/app/src/main/java", "android/app/src/main/kotlin"]:
-              if os.path.exists(old_src):
-                  shutil.rmtree(old_src)
-
           kt_dir = "android/app/src/main/kotlin/com/lvno/smartclient"
           os.makedirs(kt_dir, exist_ok=True)
 
@@ -158,7 +135,7 @@ jobs:
           import java.net.DatagramPacket
           import java.net.DatagramSocket
           import java.net.InetAddress
-          import java.util.Collections
+          import java.nio.ByteBuffer
           import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.atomic.AtomicBoolean
           import java.util.concurrent.atomic.AtomicLong
@@ -172,7 +149,7 @@ jobs:
                   val cacheBytesCount = AtomicLong(0L)
                   val blockedDnsCount = AtomicLong(0L)
                   var lastTotalBytes: Long = 0L
-                  val blockedDomains: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+                  val blockedDomains = ConcurrentHashMap.newKeySet<String>()
               }
 
               private var vpnInterface: ParcelFileDescriptor? = null
@@ -221,8 +198,8 @@ jobs:
                           .addAddress("10.88.0.2", 24)
                           .addDnsServer("1.1.1.3")
                           .addDnsServer("1.0.0.3")
-                          .addRoute("10.88.0.0", 24)
                           .addRoute("10.99.99.0", 24)
+                          .addRoute("10.88.0.0", 24)
 
                       if (blockedDomains.isNotEmpty()) {
                           builder.addRoute("1.1.1.3", 32)
@@ -231,14 +208,14 @@ jobs:
 
                       try {
                           builder.addDisallowedApplication(packageName)
-                      } catch (_: Exception) {}
+                      } catch (e: Exception) {}
 
                       vpnInterface = builder.establish()
                       if (vpnInterface != null) {
                           isRunning.set(true)
                           startPacketEngine()
                       }
-                  } catch (_: Exception) {
+                  } catch (e: Exception) {
                       isRunning.set(false)
                   }
               }
@@ -248,7 +225,7 @@ jobs:
                       val fd = vpnInterface?.fileDescriptor ?: return@Thread
                       val inputStream = FileInputStream(fd)
                       val outputStream = FileOutputStream(fd)
-                      val packet = ByteArray(32767)
+                      val packet = ByteBuffer.allocate(32767)
 
                       while (isRunning.get() && !Thread.currentThread().isInterrupted) {
                           try {
@@ -256,23 +233,26 @@ jobs:
                                   stopVpnTunnel()
                                   break
                               }
-                              val length = inputStream.read(packet)
-                              if (length > 28) {
-                                  val version = (packet[0].toInt() ushr 4) and 0x0F
-                                  val ihl = (packet[0].toInt() and 0x0F) * 4
-                                  val protocol = packet[9].toInt() and 0xFF
+                              val arr = packet.array()
+                              val length = inputStream.read(arr)
+                              if (length > 20) {
+                                  val version = (arr[0].toInt() ushr 4) and 0x0F
+                                  val ihl = (arr[0].toInt() and 0x0F) * 4
+                                  val protocol = arr[9].toInt() and 0xFF
 
                                   if (version == 4 && protocol == 17 && length > ihl + 20) {
-                                      val dstPort = ((packet[ihl + 2].toInt() and 0xFF) shl 8) or (packet[ihl + 3].toInt() and 0xFF)
+                                      val dstPort = ((arr[ihl + 2].toInt() and 0xFF) shl 8) or (arr[ihl + 3].toInt() and 0xFF)
                                       if (dstPort == 53) {
-                                          handleBlockOnlyDns(packet, length, ihl, outputStream)
+                                          handleBlockOnlyDns(arr.copyOf(length), length, ihl, outputStream)
+                                          packet.clear()
                                           continue
                                       }
                                   }
 
-                                  val b0 = packet[16].toInt() and 0xFF
-                                  val b1 = packet[17].toInt() and 0xFF
-                                  val b2 = packet[18].toInt() and 0xFF
+                                  val b0 = arr[16].toInt() and 0xFF
+                                  val b1 = arr[17].toInt() and 0xFF
+                                  val b2 = arr[18].toInt() and 0xFF
+
                                   if (b0 == 10 && b1 == 99 && b2 == 99) {
                                       cacheBytesCount.addAndGet(length.toLong())
                                   } else {
@@ -281,10 +261,11 @@ jobs:
                                   if (ecoModeEnabled.get() && length > 1100) {
                                       Thread.sleep(6L)
                                   }
+                                  packet.clear()
                               } else {
-                                  Thread.sleep(10L)
+                                  Thread.sleep(12L)
                               }
-                          } catch (_: Exception) {
+                          } catch (e: Exception) {
                               break
                           }
                       }
@@ -294,8 +275,7 @@ jobs:
 
               private fun handleBlockOnlyDns(ipPacket: ByteArray, totalLen: Int, ihl: Int, outStream: FileOutputStream) {
                   val dnsOffset = ihl + 8
-                  val dnsLen = totalLen - dnsOffset
-                  if (dnsLen < 12) return
+                  if (totalLen - dnsOffset < 12) return
 
                   val dnsQuery = ipPacket.copyOfRange(dnsOffset, totalLen)
                   val domain = extractDomainName(dnsQuery)
@@ -315,8 +295,7 @@ jobs:
                           upstreamSocket = DatagramSocket()
                           protect(upstreamSocket)
                           upstreamSocket.soTimeout = 2500
-                          val targetAddr = InetAddress.getByAddress(dstIpBytes)
-                          val upPkt = DatagramPacket(dnsQuery, dnsQuery.size, targetAddr, 53)
+                          val upPkt = DatagramPacket(dnsQuery, dnsQuery.size, InetAddress.getByAddress(dstIpBytes), 53)
                           upstreamSocket.send(upPkt)
 
                           val respBuf = ByteArray(1500)
@@ -417,7 +396,7 @@ jobs:
                   isRunning.set(false)
                   workerThread?.interrupt()
                   workerThread = null
-                  try { vpnInterface?.close() } catch (_: Exception) {}
+                  try { vpnInterface?.close() } catch (e: Exception) {}
                   vpnInterface = null
                   stopSelf()
               }
@@ -458,7 +437,7 @@ jobs:
                   var socket: DatagramSocket? = null
                   try {
                       socket = DatagramSocket()
-                      socket.soTimeout = 1500
+                      socket.soTimeout = 1000
                       val out = ByteArrayOutputStream()
                       out.write(byteArrayOf(0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
                       for (part in domainToQuery.split(".")) {
@@ -485,10 +464,10 @@ jobs:
                           }
                       }
                       return false
-                  } catch (_: Exception) {
+                  } catch (e: Exception) {
                       return false
                   } finally {
-                      try { socket?.close() } catch (_: Exception) {}
+                      try { socket?.close() } catch (e: Exception) {}
                   }
               }
 
@@ -503,7 +482,8 @@ jobs:
                               result.success(androidId)
                           }
                           "getLocalContactsJson" -> {
-                              result.success(prefs.getString("contacts_json", "{}") ?: "{}")
+                              val jsonStr = prefs.getString("contacts_json", "{}") ?: "{}"
+                              result.success(jsonStr)
                           }
                           "saveLocalContactsJson" -> {
                               val jsonStr = call.argument<String>("json") ?: "{}"
@@ -522,15 +502,15 @@ jobs:
                                       matched = verifyMikroTikSignature("10.99.99.1", "gateway.lvno.local")
                                   }
                                   runOnUiThread { result.success(matched) }
-                          }.start()
-                      }
+                              }.start()
+                          }
                           "scanQrNative" -> {
                               try {
                                   val intent = Intent("com.google.zxing.client.android.SCAN")
                                   intent.putExtra("SCAN_MODE", "QR_CODE_MODE")
                                   pendingQrResult = result
                                   startActivityForResult(intent, QR_REQUEST_CODE)
-                              } catch (_: Exception) {
+                              } catch (e: Exception) {
                                   result.success("")
                               }
                           }
@@ -686,7 +666,6 @@ jobs:
           const Color kDarkCard = Color(0xFF1E293B);
           const Color kMandarinOrange = Color(0xFFFF8C00);
           const Color kMandarinDark = Color(0xFFE67E00);
-          const Color kSuccessGreen = Color(0xFF10B981);
 
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
@@ -731,7 +710,6 @@ jobs:
             int blockedRulesCount = 0;
             int _saveTickCounter = 0;
             int _routerVerifyTickCounter = 0;
-            int _consecutiveVerifyFails = 0;
 
             static const MethodChannel _vpnChannel = MethodChannel('com.lvno.smartclient/vpn');
 
@@ -824,9 +802,7 @@ jobs:
             Future<void> knockMikroTikGateway({required bool unlock}) async {
               final int port = unlock ? 9981 : 9982;
               try {
-                await http
-                    .get(Uri.parse('http://$currentGatewayIp:$port/?key=$currentDynamicSecret'))
-                    .timeout(const Duration(milliseconds: 600));
+                await http.get(Uri.parse('http://$currentGatewayIp:$port')).timeout(const Duration(milliseconds: 600));
               } catch (_) {}
             }
 
@@ -1093,20 +1069,14 @@ jobs:
                 }
 
                 _routerVerifyTickCounter++;
-                if (_routerVerifyTickCounter >= 225) {
+                if (_routerVerifyTickCounter >= 50) {
                   _routerVerifyTickCounter = 0;
                   final stillOnRouter = await discoverAndVerifyPhysicalNetwork();
-                  if (stillOnRouter) {
-                    _consecutiveVerifyFails = 0;
-                    await knockMikroTikGateway(unlock: true);
-                  } else {
-                    _consecutiveVerifyFails++;
-                    if (_consecutiveVerifyFails >= 2) {
-                      _consecutiveVerifyFails = 0;
-                      await stopSmartConnection();
-                      return;
-                    }
+                  if (!stillOnRouter) {
+                    await stopSmartConnection();
+                    return;
                   }
+                  await knockMikroTikGateway(unlock: true);
                 }
 
                 final int remBytes = activeChunkTotalBytes - activeChunkConsumedBytes;
@@ -1197,7 +1167,6 @@ jobs:
                 throw Exception("⛔ لا يمكن تشغيل النفق! أنت غير متصل بشبكة ميكروتك مفعلة في النظام");
               }
 
-              _consecutiveVerifyFails = 0;
               await syncDevicePolicyFromWalletDoc(wData);
 
               if ((activeChunkTotalBytes - activeChunkConsumedBytes) <= 512 * 1024) {
@@ -1213,7 +1182,6 @@ jobs:
             Future<void> stopSmartConnection() async {
               liveSpeedKbps = 0.0;
               currentHostName = "غير متصل بشبكة مفعلة";
-              _consecutiveVerifyFails = 0;
               await persistQuotaState();
               await knockMikroTikGateway(unlock: false);
               try {
@@ -1414,21 +1382,9 @@ jobs:
                       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
                     ),
                   ),
-                  navigationBarTheme: NavigationBarThemeData(
+                  navigationBarTheme: const NavigationBarThemeData(
                     backgroundColor: kDarkSurface,
-                    indicatorColor: kMandarinOrange.withOpacity(0.22),
-                    iconTheme: WidgetStateProperty.resolveWith((states) {
-                      if (states.contains(WidgetState.selected)) {
-                        return const IconThemeData(color: kMandarinOrange);
-                      }
-                      return const IconThemeData(color: Colors.white60);
-                    }),
-                    labelTextStyle: WidgetStateProperty.resolveWith((states) {
-                      if (states.contains(WidgetState.selected)) {
-                        return const TextStyle(color: kMandarinOrange, fontWeight: FontWeight.bold, fontSize: 12);
-                      }
-                      return const TextStyle(color: Colors.white60, fontSize: 11);
-                    }),
+                    indicatorColor: Color(0x38FF8C00),
                   ),
                 ),
                 home: const Directionality(
@@ -1621,7 +1577,7 @@ jobs:
                             width: 10,
                             height: 10,
                             decoration: BoxDecoration(
-                              color: widget.engine.isVpnActive ? kSuccessGreen : kMandarinOrange,
+                              color: widget.engine.isVpnActive ? const Color(0xFF10B981) : kMandarinOrange,
                               shape: BoxShape.circle,
                             ),
                           ),
@@ -1675,10 +1631,26 @@ jobs:
                       selectedIndex: _currentTab,
                       onDestinationSelected: (idx) => setState(() => _currentTab = idx),
                       destinations: const [
-                        NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), label: 'الرصيد'),
-                        NavigationDestination(icon: Icon(Icons.local_gas_station_outlined), label: 'النفق والعداد'),
-                        NavigationDestination(icon: Icon(Icons.family_restroom_outlined), label: 'التحكم'),
-                        NavigationDestination(icon: Icon(Icons.manage_accounts_outlined), label: 'الإدارة'),
+                        NavigationDestination(
+                          icon: Icon(Icons.account_balance_wallet_outlined),
+                          selectedIcon: Icon(Icons.account_balance_wallet, color: kMandarinOrange),
+                          label: 'الرصيد',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.local_gas_station_outlined),
+                          selectedIcon: Icon(Icons.local_gas_station, color: kMandarinOrange),
+                          label: 'النفق والعداد',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.family_restroom_outlined),
+                          selectedIcon: Icon(Icons.family_restroom, color: kMandarinOrange),
+                          label: 'التحكم',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.manage_accounts_outlined),
+                          selectedIcon: Icon(Icons.manage_accounts, color: kMandarinOrange),
+                          label: 'الإدارة',
+                        ),
                       ],
                     ),
                   );
@@ -1717,7 +1689,7 @@ jobs:
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 const Text("الرصيد النقدي", style: TextStyle(fontSize: 12, color: Colors.white70)),
-                                Text("$cashBal ريال", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
+                                Text("$cashBal ريال", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                               ],
                             ),
                           ),
@@ -1776,11 +1748,10 @@ jobs:
                               ),
                             ],
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 10),
                           Row(
                             children: [
                               Expanded(child: TextField(controller: _receiverCtrl, keyboardType: TextInputType.number, decoration: _dec("رقم الحساب المستلم"))),
-                              const SizedBox(width: 6),
                               TextButton(
                                 style: TextButton.styleFrom(foregroundColor: kMandarinOrange),
                                 onPressed: () => setState(() {
@@ -1793,7 +1764,7 @@ jobs:
                           ),
                           const SizedBox(height: 10),
                           TextField(controller: _amountCtrl, keyboardType: TextInputType.number, decoration: _dec("المبلغ بالريال")),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
                           ElevatedButton(
                             onPressed: () async {
                               try {
@@ -1829,7 +1800,6 @@ jobs:
                         title: Text(_localContacts[k].toString()),
                         subtitle: Text("حساب #$k", style: const TextStyle(color: Colors.white54)),
                         trailing: ElevatedButton(
-                          style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8)),
                           onPressed: () => setState(() => _receiverCtrl.text = k.toString()),
                           child: const Text("اختيار"),
                         ),
@@ -1882,9 +1852,9 @@ jobs:
                             ),
                             textAlign: TextAlign.center,
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
                           Container(
-                            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 18),
                             decoration: BoxDecoration(
                               color: kDarkBg,
                               borderRadius: BorderRadius.circular(14),
@@ -1892,15 +1862,10 @@ jobs:
                             ),
                             child: Text(
                               "${liveBalanceYer.toStringAsFixed(4)} ريال",
-                              style: const TextStyle(
-                                fontSize: 32,
-                                fontWeight: FontWeight.w900,
-                                fontFamily: 'monospace',
-                                color: kMandarinOrange,
-                              ),
+                              style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, fontFamily: 'monospace', color: kMandarinOrange),
                             ),
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
@@ -1910,33 +1875,15 @@ jobs:
                             ],
                           ),
                           const SizedBox(height: 12),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: LinearProgressIndicator(
-                              value: tankProgress,
-                              minHeight: 10,
-                              backgroundColor: kDarkBg,
-                              color: kMandarinOrange,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            "الدفعة: $chunkMaxMb MB | التجديد التلقائي عند: $triggerMb MB",
-                            style: const TextStyle(fontSize: 11, color: Colors.white54),
-                          ),
+                          LinearProgressIndicator(value: tankProgress, minHeight: 8, backgroundColor: kDarkBg, color: kMandarinOrange),
                           const SizedBox(height: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: kDarkBg,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              widget.engine.blockedRulesCount > 0
-                                  ? "🛡️ فلتر DNS المحلي: ${widget.engine.blockedRulesCount} قاعدة حظر | صدّ ${widget.engine.blockedDnsCount} طلب"
-                                  : "🛡️ فلتر DNS المحلي: شفاف وسريع (لا توجد قيود حظر)",
-                              style: const TextStyle(fontSize: 11, color: kSuccessGreen, fontWeight: FontWeight.bold),
-                            ),
+                          Text("الدفعة: $chunkMaxMb MB | التجديد التلقائي عند: $triggerMb MB", style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                          const SizedBox(height: 6),
+                          Text(
+                            widget.engine.blockedRulesCount > 0
+                                ? "🛡️ فلتر DNS المحلي: ${widget.engine.blockedRulesCount} قاعدة حظر | صدّ ${widget.engine.blockedDnsCount} طلب"
+                                : "🛡️ فلتر DNS المحلي: شفاف وسريع",
+                            style: const TextStyle(fontSize: 11, color: Color(0xFF10B981), fontWeight: FontWeight.bold),
                           ),
                           const SizedBox(height: 16),
                           SizedBox(
@@ -1945,7 +1892,7 @@ jobs:
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: widget.engine.isVpnActive ? Colors.redAccent : kMandarinOrange,
                                 foregroundColor: widget.engine.isVpnActive ? Colors.white : Colors.black,
-                                padding: const EdgeInsets.symmetric(vertical: 15),
+                                padding: const EdgeInsets.symmetric(vertical: 14),
                               ),
                               onPressed: () async {
                                 try {
@@ -2227,110 +2174,21 @@ jobs:
           main_clean = main_code.replace("__API_KEY__", api_key).replace("__APP_ID__", app_id).replace("__SENDER_ID__", sender_id).replace("__PROJECT_ID__", project_id)
           write_clean("lib/main.dart", main_clean)
 
-          for s_file in ["android/settings.gradle", "android/settings.gradle.kts"]:
-              if os.path.exists(s_file):
-                  with open(s_file, "r", encoding="utf-8") as sf:
-                      stxt = sf.read()
-                  stxt = re.sub(r'id\s+"com\.android\.application"\s+version\s+"[^"]+"', 'id "com.android.application" version "8.4.0"', stxt)
-                  stxt = re.sub(r'id\("com\.android\.application"\)\s+version\s+"[^"]+"', 'id("com.android.application") version "8.4.0"', stxt)
-                  stxt = re.sub(r'id\s+"org\.jetbrains\.kotlin\.android"\s+version\s+"[^"]+"', 'id "org.jetbrains.kotlin.android" version "1.9.24"', stxt)
-                  stxt = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"[^"]+"', 'id("org.jetbrains.kotlin.android") version "1.9.24"', stxt)
-                  with open(s_file, "w", encoding="utf-8") as sf:
-                      sf.write(stxt)
-
-          gw_prop = "android/gradle/wrapper/gradle-wrapper.properties"
-          if os.path.exists(gw_prop):
-              with open(gw_prop, "r", encoding="utf-8") as gwf:
-                  gwtxt = gwf.read()
-              gwtxt = re.sub(r"gradle-[0-9.]+-all\.zip", "gradle-8.7-bin.zip", gwtxt)
-              gwtxt = re.sub(r"gradle-[0-9.]+-bin\.zip", "gradle-8.7-bin.zip", gwtxt)
-              with open(gw_prop, "w", encoding="utf-8") as gwf:
-                  gwf.write(gwtxt)
-
-          write_clean("android/gradle.properties", r'''
-          org.gradle.jvmargs=-Xmx2G -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8
-          org.gradle.parallel=false
-          org.gradle.workers.max=2
-          kotlin.daemon.jvm.options=-Xmx1G
-          android.useAndroidX=true
-          android.enableJetifier=true
-          ''')
-
-          if os.path.exists("android/app/build.gradle.kts"):
-              os.remove("android/app/build.gradle.kts")
-
-          app_build_gradle = r'''
-          plugins {
-              id "com.android.application"
-              id "kotlin-android"
-              id "dev.flutter.flutter-gradle-plugin"
-          }
-
-          android {
-              namespace = "com.lvno.smartclient"
-              compileSdk = 35
-              ndkVersion = flutter.ndkVersion
-
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-
-              lint {
-                  checkReleaseBuilds = false
-                  abortOnError = false
-              }
-
-              defaultConfig {
-                  applicationId = "com.lvno.smartclient"
-                  minSdk = 23
-                  targetSdk = 34
-                  versionCode = 38
-                  versionName = "6.9.7"
-                  multiDexEnabled = true
-              }
-
-              buildTypes {
-                  release {
-                      signingConfig = signingConfigs.debug
-                      minifyEnabled = false
-                      shrinkResources = false
-                  }
-              }
-          }
-
-          flutter {
-              source = "../.."
-          }
-          '''
-          write_clean("android/app/build.gradle", app_build_gradle)
+          for app_g in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
+              if os.path.exists(app_g):
+                  txt = open(app_g).read()
+                  txt = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 23", txt)
+                  txt = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", txt)
+                  open(app_g, "w").write(txt)
 
       - name: Install Flutter Dependencies
         run: flutter pub get
 
-      - name: Analyze Dart Code
-        run: flutter analyze --no-fatal-infos
-
       - name: Build Release APK
-        shell: bash
-        run: |
-          set -o pipefail
-          flutter build apk --release --no-shrink 2>&1 | tee /tmp/build.log
-
-      - name: Show Error Summary on Failure
-        if: failure()
-        run: |
-          echo "=== LAST 80 LINES OF BUILD LOG ==="
-          tail -n 80 /tmp/build.log || true
+        run: flutter build apk --release --no-shrink
 
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
         with:
           name: LVNO-SmartClient-Release-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
-          retention-days: 30
